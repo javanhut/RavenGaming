@@ -36,7 +36,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::drivers::which;
@@ -431,6 +431,35 @@ impl Action {
         }
     }
 
+    /// Whether the world already looks the way this action would leave
+    /// it.
+    ///
+    /// Used twice: to skip work that is already done, and afterwards as
+    /// the real test of whether it worked. An exit status says what a
+    /// program claimed; this says what is true.
+    pub fn is_already_done(&self) -> bool {
+        match self {
+            Action::DkmsInstall { kernel } => {
+                let modules = crate::drivers::dkms_status();
+                !modules.is_empty()
+                    && modules
+                        .iter()
+                        .filter(|m| m.kernel == *kernel)
+                        .any(|m| m.is_installed())
+            }
+            Action::ApplyTweaks => tweaks_needed().is_empty() && Path::new(SYSCTL_FILE).exists(),
+            Action::RevertTweaks => {
+                !Path::new(SYSCTL_FILE).exists() && !Path::new(LIMITS_FILE).exists()
+            }
+            Action::GpuMode { card, mode } => {
+                let path = Path::new("/sys/class/drm")
+                    .join(card)
+                    .join("device/power_dpm_force_performance_level");
+                read_text(path).and_then(|v| GpuMode::from_sysfs(&v)) == Some(*mode)
+            }
+        }
+    }
+
     /// The other side: an argument list back into an action, refusing
     /// anything that is not one. This is what runs as root.
     pub fn parse(args: &[String]) -> Result<Action, String> {
@@ -590,17 +619,130 @@ pub fn tweaks_persisted() -> bool {
 
 // ---- asking for the password --------------------------------------------
 
-/// Re-runs this binary as root to carry out one action.
+/// How this machine can be asked to run something as root.
 ///
-/// `run0` first, as on the rest of Raven, falling back to `pkexec`. run0
-/// needs a booted systemd; without one it fails before any authorization
-/// happens, which must not be reported to the person as a refusal.
+/// There is no single answer on Linux and there is certainly not one on
+/// Raven. `run0` needs a booted systemd; Raven runs its own init, so it
+/// has none. `pkexec` needs polkit, and Raven does not run that either —
+/// its pattern is a root daemon with a group-owned socket, which is how
+/// `rvnd` installs packages for `wheel` and how `raven-powerd` sets the
+/// power profile for `video`, both without a password.
+///
+/// Neither of those daemons builds kernel modules or writes `sysctl`, so
+/// for the two things this app does as root the ladder ends where `rvn`'s
+/// own advice ends: `sudo`, in a terminal, where a password prompt
+/// belongs. This app never asks for a password itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Escalation {
+    /// systemd's own, which shows the desktop's authentication dialog.
+    Run0,
+    /// polkit's, the same.
+    Pkexec,
+    /// sudo, already authorised — cached credentials or a NOPASSWD rule —
+    /// so it runs with nothing to type.
+    SudoNow,
+    /// sudo in a terminal, where the person types their password.
+    SudoTerminal(PathBuf),
+    /// Nothing works. [`Escalation::reason`] says what to do about it.
+    None,
+}
+
+/// The terminals looked for, in the order preferred.
+const TERMINALS: [&str; 5] = ["raven-terminal", "foot", "alacritty", "kitty", "xterm"];
+
+impl Escalation {
+    /// What this machine will actually accept, established by asking
+    /// rather than by assuming.
+    ///
+    /// `pkexec` being installed is not the question — it ships in the
+    /// polkit package and is present on machines with no polkit running,
+    /// where it fails with a D-Bus error about `StartServiceByName` that
+    /// means nothing to anybody. So the daemon is looked for, not the tool.
+    pub fn detect() -> Escalation {
+        if which("run0").is_some() && Path::new("/run/systemd/system").is_dir() {
+            return Escalation::Run0;
+        }
+        if which("pkexec").is_some() && crate::drivers::process_running("polkitd") {
+            return Escalation::Pkexec;
+        }
+        if sudo_is_ready() {
+            return Escalation::SudoNow;
+        }
+        if which("sudo").is_some()
+            && let Some(terminal) = TERMINALS.iter().find_map(|t| which(t))
+        {
+            return Escalation::SudoTerminal(terminal);
+        }
+        Escalation::None
+    }
+
+    /// What the person will see when this is used.
+    pub fn describes_prompt(&self) -> Option<&'static str> {
+        match self {
+            Escalation::Run0 | Escalation::Pkexec => {
+                Some("Your desktop will ask for authorisation.")
+            }
+            Escalation::SudoNow => None,
+            Escalation::SudoTerminal(_) => Some(
+                "A terminal will open. Type your password there — this window never asks for it.",
+            ),
+            Escalation::None => None,
+        }
+    }
+
+    pub fn reason(&self) -> String {
+        match self {
+            Escalation::None => {
+                let mut missing = Vec::new();
+                if which("sudo").is_none() {
+                    missing.push("sudo is not installed");
+                }
+                if TERMINALS.iter().all(|t| which(t).is_none()) {
+                    missing.push("no terminal emulator is installed");
+                }
+                if missing.is_empty() {
+                    missing.push("no way to run a command as root could be found");
+                }
+                format!(
+                    "This change needs root, and {}. On a system with neither systemd's run0 nor polkit, sudo in a terminal is the remaining route.",
+                    missing.join(", and ")
+                )
+            }
+            _ => String::new(),
+        }
+    }
+}
+
+/// Whether sudo will run something right now without asking anything.
+fn sudo_is_ready() -> bool {
+    let Some(sudo) = which("sudo") else {
+        return false;
+    };
+    Command::new(sudo)
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Runs one action as root, and then checks that it happened.
+///
+/// The check is the point. Every rung of the ladder can report success
+/// without the work being done — a terminal that the person closed, a
+/// prompt they dismissed, a build that failed after authorisation
+/// succeeded — so the exit status is treated as a hint and the state of
+/// the machine as the answer.
 pub fn run_as_root(action: &Action) -> Result<(), String> {
+    if action.is_already_done() {
+        return Ok(());
+    }
     let executable = std::env::current_exe()
         .map_err(|e| format!("Could not locate the Raven Gaming executable: {e}"))?;
-    let systemd_booted = Path::new("/run/systemd/system").is_dir();
-    let output = if which("run0").is_some() && systemd_booted {
-        Command::new("run0")
+    let escalation = Escalation::detect();
+    let outcome = match &escalation {
+        Escalation::Run0 => Command::new("run0")
             .args([
                 "--unit=raven-gaming-apply".to_string(),
                 format!("--description={}", action.description()),
@@ -608,29 +750,89 @@ pub fn run_as_root(action: &Action) -> Result<(), String> {
             .arg(&executable)
             .args(action.args())
             .output()
-    } else if which("pkexec").is_some() {
-        Command::new("pkexec")
+            .map(|out| {
+                (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                )
+            }),
+        Escalation::Pkexec => Command::new("pkexec")
             .arg(&executable)
             .args(action.args())
             .output()
-    } else {
-        return Err("Raven Gaming needs run0 or pkexec to change system settings".into());
-    }
-    .map_err(|e| format!("Could not request authorization: {e}"))?;
+            .map(|out| {
+                (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                )
+            }),
+        Escalation::SudoNow => Command::new("sudo")
+            .arg("-n")
+            .arg(&executable)
+            .args(action.args())
+            .output()
+            .map(|out| {
+                (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                )
+            }),
+        Escalation::SudoTerminal(terminal) => {
+            // `-e` is the xterm convention every one of these follows, and
+            // everything after it is argv — no shell, so nothing here has
+            // to be quoted and nothing can be re-parsed as a command.
+            let mut command = Command::new(terminal);
+            command
+                .arg("-e")
+                .arg("sudo")
+                .arg(&executable)
+                .args(action.args());
+            command
+                .status()
+                .map(|status| (status.success(), String::new()))
+        }
+        Escalation::None => return Err(escalation.reason()),
+    };
 
-    if output.status.success() {
+    let (reported_success, stderr) = outcome.map_err(|e| match &escalation {
+        Escalation::SudoTerminal(terminal) => {
+            format!("Could not open {}: {e}", terminal.display())
+        }
+        _ => format!("Could not request authorization: {e}"),
+    })?;
+
+    // The machine's own answer, which outranks the exit status.
+    if action.is_already_done() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // pkexec's own refusal, and run0's, both say "dismissed" or "not
-    // authorized"; anything else is the action's own error, which is
-    // worth showing verbatim.
     if stderr.contains("dismissed") || stderr.contains("not authorized") {
-        return Err("Authorization was not given".into());
+        return Err("Authorisation was not given".into());
     }
-    Err(last_line(&stderr)
-        .unwrap_or("The change could not be made")
-        .to_string())
+    if stderr.contains("PolicyKit1") || stderr.contains("Error getting authority") {
+        return Err(
+            "polkit is not running on this system, so pkexec cannot authorise anything. Raven uses sudo in a terminal instead."
+                .into(),
+        );
+    }
+    if let Some(line) = last_line(&stderr) {
+        return Err(line.to_string());
+    }
+    if reported_success {
+        Err(format!(
+            "{} reported success, but nothing changed. Running `sudo raven-gaming {}` in a terminal will say why.",
+            match escalation {
+                Escalation::SudoTerminal(_) => "The terminal",
+                _ => "The authorisation",
+            },
+            action.args().join(" ")
+        ))
+    } else {
+        Err(format!(
+            "{} did not complete. Running `sudo raven-gaming {}` in a terminal will say why.",
+            action.description(),
+            action.args().join(" ")
+        ))
+    }
 }
 
 // ---- shader cache --------------------------------------------------------
@@ -789,6 +991,75 @@ mod tests {
         for card in ["cardX", "../card0", "card", "0", "card0/../.."] {
             assert!(validate_card(card).is_err(), "accepted {card:?}");
         }
+    }
+
+    #[test]
+    fn the_escalation_ladder_matches_what_this_machine_has() {
+        // Whatever it picks must be something actually present, and the
+        // rungs must be tried in the stated order.
+        match Escalation::detect() {
+            Escalation::Run0 => {
+                assert!(which("run0").is_some());
+                assert!(Path::new("/run/systemd/system").is_dir());
+            }
+            Escalation::Pkexec => {
+                assert!(which("pkexec").is_some());
+                // The regression this guards: pkexec is installed on
+                // machines with no polkit running, where it fails with a
+                // D-Bus error nobody can act on.
+                assert!(crate::drivers::process_running("polkitd"));
+            }
+            Escalation::SudoNow => assert!(which("sudo").is_some()),
+            Escalation::SudoTerminal(terminal) => {
+                assert!(which("sudo").is_some());
+                assert!(terminal.is_file());
+            }
+            Escalation::None => {
+                assert!(which("sudo").is_none() || TERMINALS.iter().all(|t| which(t).is_none()));
+            }
+        }
+    }
+
+    #[test]
+    fn having_no_way_to_escalate_is_explained_rather_than_reported() {
+        let reason = Escalation::None.reason();
+        assert!(!reason.is_empty());
+        assert!(reason.contains("root"));
+        // No D-Bus jargon: the point of the reason is that a person can
+        // act on it.
+        assert!(!reason.contains("StartServiceByName"));
+        // Every other rung has nothing to explain.
+        for rung in [Escalation::Run0, Escalation::Pkexec, Escalation::SudoNow] {
+            assert!(rung.reason().is_empty());
+        }
+    }
+
+    #[test]
+    fn only_the_terminal_rung_warns_about_a_terminal() {
+        assert!(
+            Escalation::SudoTerminal(PathBuf::from("/usr/bin/xterm"))
+                .describes_prompt()
+                .is_some_and(|text| text.contains("terminal"))
+        );
+        // Already authorised means nothing will be asked, so nothing is
+        // promised.
+        assert!(Escalation::SudoNow.describes_prompt().is_none());
+        assert!(Escalation::None.describes_prompt().is_none());
+    }
+
+    #[test]
+    fn an_action_can_tell_whether_it_still_needs_doing() {
+        // Reverting on a machine with no files written is already done,
+        // so it never asks for a password at all.
+        let clean = !Path::new(SYSCTL_FILE).exists() && !Path::new(LIMITS_FILE).exists();
+        assert_eq!(Action::RevertTweaks.is_already_done(), clean);
+        // Applying and reverting cannot both be satisfied.
+        assert!(!(Action::ApplyTweaks.is_already_done() && Action::RevertTweaks.is_already_done()));
+        // A kernel with no DKMS module built is not done.
+        let missing = Action::DkmsInstall {
+            kernel: "0.0.0-not-a-kernel".into(),
+        };
+        assert!(!missing.is_already_done());
     }
 
     #[test]

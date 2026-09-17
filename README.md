@@ -103,10 +103,29 @@ only two ways:
 
 - **Packages** go through `rvn --json`, which hands the root half to `rvnd`
   itself. No sudo, no password dialog — the same path Raven Store uses.
-- **Everything else** re-runs this binary as `raven-gaming --apply …` under
-  `run0` or `pkexec`. That privileged half matches its arguments against a
-  fixed list of four actions and refuses anything else, so a bug in the
-  window cannot become an arbitrary write as root.
+- **Everything else** re-runs this binary as `raven-gaming --apply …` as
+  root. That privileged half matches its arguments against a fixed list of
+  four actions and refuses anything else, so a bug in the window cannot
+  become an arbitrary write as root.
+
+  How root is asked for is established by asking, not by assuming, because
+  the usual answers are both absent here. `run0` needs a booted systemd and
+  Raven runs its own init. `pkexec` needs polkit, which Raven does not run
+  either — `pkexec` is nonetheless *installed*, and on a machine with no
+  polkit it fails with a D-Bus error about `StartServiceByName` that means
+  nothing to anyone. So the ladder looks for the polkit **daemon**, not the
+  tool, and where neither is available it falls to `sudo`: silently when
+  credentials are already cached, and otherwise in a terminal, which is
+  where `rvn`'s own advice ends up too. This window never asks for a
+  password itself.
+
+  Every rung can report success without the work having happened — a
+  dismissed prompt, a closed terminal, a build that failed after
+  authorisation succeeded. So the exit status is treated as a hint and the
+  state of the machine as the answer: each action can say whether it is
+  already done, which is checked before asking for root (and skips the
+  prompt entirely when there is nothing to do) and again afterwards as the
+  real test of whether it worked.
 
 Audio settings need neither: PipeWire takes them from the running session
 and from a file in your own config.
@@ -141,6 +160,7 @@ meantime and the cost of being wrong is somebody's saves.
 | Controllers | `/proc/bus/input/devices`, and `/dev/input/eventN` for the tester |
 | Controller batteries | `/sys/class/power_supply`, filtered to `scope = Device` |
 | Proton builds and prefixes | `steamapps/common`, `compatibilitytools.d`, `compatdata` |
+| Whether root can be asked for | a booted systemd, a running `polkitd`, and `sudo -n` |
 
 A reading that is not available is drawn as a dash and a check that cannot
 be established says so. Nothing reports a state it has not observed.

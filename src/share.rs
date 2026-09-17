@@ -26,7 +26,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::checks::{Check, Fix, State};
-use crate::drivers::which;
+use crate::drivers::{process_running, which};
 
 /// Every `.portal` file, which is how a backend declares what it can do.
 const PORTAL_DIRS: [&str; 2] = [
@@ -71,29 +71,6 @@ fn declares_interface(text: &str, interface: &str) -> bool {
                 .map(str::trim)
                 .any(|entry| entry == interface)
         })
-}
-
-fn process_running(name: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().chars().all(|c| c.is_ascii_digit()))
-        {
-            continue;
-        }
-        // `comm` is the executable name, truncated to 15 characters — long
-        // enough for every name checked here, and cheaper than cmdline.
-        if let Ok(comm) = std::fs::read_to_string(path.join("comm"))
-            && comm.trim() == name
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// Whether PipeWire is running, which is how captured frames and game

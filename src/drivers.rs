@@ -345,6 +345,32 @@ fn strip_package_version(dir: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// Whether a process with this executable name is running.
+///
+/// `comm` is the name the kernel keeps, truncated to fifteen characters —
+/// long enough for every name asked about here, and far cheaper than
+/// reading and splitting each `cmdline`.
+pub fn process_running(name: &str) -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().chars().all(|c| c.is_ascii_digit()))
+        {
+            continue;
+        }
+        if let Ok(comm) = fs::read_to_string(path.join("comm"))
+            && comm.trim() == name
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn which(command: &str) -> Option<std::path::PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)

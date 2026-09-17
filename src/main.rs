@@ -372,6 +372,16 @@ fn main() -> glib::ExitCode {
             Ok(()) => glib::ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("raven-gaming: {error}");
+                // When this half is running in a terminal the window
+                // closes the instant it exits, taking the only
+                // explanation with it. Holding here keeps the message on
+                // screen; with no terminal attached there is nobody to
+                // wait for and it exits at once.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprintln!("\nPress Enter to close this window.");
+                    let mut discard = String::new();
+                    let _ = std::io::stdin().read_line(&mut discard);
+                }
                 glib::ExitCode::FAILURE
             }
         };
@@ -5297,6 +5307,9 @@ fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>) -> bool {
             ok
         }
         Fix::BuildModules(kernels) => {
+            if let Some(how) = tune::Escalation::detect().describes_prompt() {
+                let _ = sender.send(TaskEvent::Log(how.to_string()));
+            }
             for kernel in kernels {
                 let _ = sender.send(TaskEvent::Stage(format!(
                     "Building driver modules for {kernel} — this takes a few minutes"
@@ -5314,6 +5327,9 @@ fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>) -> bool {
         }
         Fix::ApplyTweaks => {
             let _ = sender.send(TaskEvent::Stage("Applying system settings".into()));
+            if let Some(how) = tune::Escalation::detect().describes_prompt() {
+                let _ = sender.send(TaskEvent::Log(how.to_string()));
+            }
             match tune::run_as_root(&tune::Action::ApplyTweaks) {
                 Ok(()) => {
                     let _ = sender.send(TaskEvent::Log(
