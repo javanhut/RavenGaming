@@ -619,6 +619,70 @@ pub fn tweaks_persisted() -> bool {
 
 // ---- asking for the password --------------------------------------------
 
+/// A password, held for as long as it takes to hand to sudo.
+///
+/// Overwritten on drop. That is worth doing and worth not overstating: the
+/// bytes this struct owns are cleared, but a `String` that has been moved
+/// or grown may have left copies behind that nothing can reach to clear,
+/// and the kernel may have paged any of it out. The real protections are
+/// the ones around it — it is never an argument, never an environment
+/// variable, never logged, and never leaves this process except down a
+/// pipe to sudo's standard input.
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(password: String) -> Secret {
+        Secret(password)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        // SAFETY: the buffer is only ever filled with zero, which is valid
+        // UTF-8, so the String is still a String afterwards.
+        unsafe { self.0.as_mut_vec() }.fill(0);
+    }
+}
+
+/// Deliberately says nothing. A password that can be printed by accident
+/// eventually is.
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(…)")
+    }
+}
+
+/// Why running something as root did not work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootFailure {
+    /// sudo did not accept the password. Worth another go.
+    WrongPassword,
+    /// A password is needed and none was given.
+    PasswordNeeded,
+    /// Anything else, with what to tell the person.
+    Other(String),
+}
+
+impl RootFailure {
+    pub fn message(&self) -> String {
+        match self {
+            RootFailure::WrongPassword => "That password was not accepted.".into(),
+            RootFailure::PasswordNeeded => "This change needs your password.".into(),
+            RootFailure::Other(text) => text.clone(),
+        }
+    }
+}
+
+impl fmt::Display for RootFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 /// How this machine can be asked to run something as root.
 ///
 /// There is no single answer on Linux and there is certainly not one on
@@ -629,10 +693,10 @@ pub fn tweaks_persisted() -> bool {
 /// power profile for `video`, both without a password.
 ///
 /// Neither of those daemons builds kernel modules or writes `sysctl`, so
-/// for the two things this app does as root the ladder ends where `rvn`'s
-/// own advice ends: `sudo`, in a terminal, where a password prompt
-/// belongs. This app never asks for a password itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// for the two things this app does as root the ladder ends at `sudo` —
+/// asked for in this window, with the password going straight down a pipe
+/// to sudo's standard input and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Escalation {
     /// systemd's own, which shows the desktop's authentication dialog.
     Run0,
@@ -641,14 +705,11 @@ pub enum Escalation {
     /// sudo, already authorised — cached credentials or a NOPASSWD rule —
     /// so it runs with nothing to type.
     SudoNow,
-    /// sudo in a terminal, where the person types their password.
-    SudoTerminal(PathBuf),
+    /// sudo, which needs the password this window will ask for.
+    SudoPassword,
     /// Nothing works. [`Escalation::reason`] says what to do about it.
     None,
 }
-
-/// The terminals looked for, in the order preferred.
-const TERMINALS: [&str; 5] = ["raven-terminal", "foot", "alacritty", "kitty", "xterm"];
 
 impl Escalation {
     /// What this machine will actually accept, established by asking
@@ -665,49 +726,35 @@ impl Escalation {
         if which("pkexec").is_some() && crate::drivers::process_running("polkitd") {
             return Escalation::Pkexec;
         }
+        if which("sudo").is_none() {
+            return Escalation::None;
+        }
         if sudo_is_ready() {
-            return Escalation::SudoNow;
+            Escalation::SudoNow
+        } else {
+            Escalation::SudoPassword
         }
-        if which("sudo").is_some()
-            && let Some(terminal) = TERMINALS.iter().find_map(|t| which(t))
-        {
-            return Escalation::SudoTerminal(terminal);
-        }
-        Escalation::None
+    }
+
+    /// Whether this app has to ask for a password before it can act.
+    pub fn needs_password(self) -> bool {
+        self == Escalation::SudoPassword
     }
 
     /// What the person will see when this is used.
-    pub fn describes_prompt(&self) -> Option<&'static str> {
+    pub fn describes_prompt(self) -> Option<&'static str> {
         match self {
             Escalation::Run0 | Escalation::Pkexec => {
                 Some("Your desktop will ask for authorisation.")
             }
-            Escalation::SudoNow => None,
-            Escalation::SudoTerminal(_) => Some(
-                "A terminal will open. Type your password there — this window never asks for it.",
-            ),
-            Escalation::None => None,
+            Escalation::SudoPassword => Some("Authorised with the password you gave."),
+            Escalation::SudoNow | Escalation::None => None,
         }
     }
 
-    pub fn reason(&self) -> String {
+    pub fn reason(self) -> String {
         match self {
-            Escalation::None => {
-                let mut missing = Vec::new();
-                if which("sudo").is_none() {
-                    missing.push("sudo is not installed");
-                }
-                if TERMINALS.iter().all(|t| which(t).is_none()) {
-                    missing.push("no terminal emulator is installed");
-                }
-                if missing.is_empty() {
-                    missing.push("no way to run a command as root could be found");
-                }
-                format!(
-                    "This change needs root, and {}. On a system with neither systemd's run0 nor polkit, sudo in a terminal is the remaining route.",
-                    missing.join(", and ")
-                )
-            }
+            Escalation::None => "This change needs root, and neither systemd's run0, nor polkit, nor sudo is available to ask for it.".into(),
             _ => String::new(),
         }
     }
@@ -727,21 +774,67 @@ fn sudo_is_ready() -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// sudo's own prompt and its complaints, which have no business in a log
+/// the person reads.
+fn is_sudo_chatter(line: &str) -> bool {
+    let line = line.trim();
+    line.is_empty()
+        || line.starts_with("[sudo]")
+        || line.starts_with("Password:")
+        || line.starts_with("Sorry, try again")
+        || line.contains("incorrect password attempt")
+}
+
+fn wrong_password(stderr: &str) -> bool {
+    stderr.contains("Sorry, try again")
+        || stderr.contains("incorrect password")
+        || stderr.contains("no password was provided")
+        || stderr.contains("a password is required")
+}
+
+/// Whether sudo accepts this password, asked with a command that does
+/// nothing.
+///
+/// Used before the work starts so a mistyped password is answered in the
+/// dialog, where it can be retyped, instead of surfacing as a failed job
+/// several minutes into a module build.
+pub fn password_is_accepted(secret: &Secret) -> bool {
+    let Some(sudo) = which("sudo") else {
+        return false;
+    };
+    let Ok(mut child) = Command::new(sudo)
+        .args(["-S", "-p", "", "true"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(secret.as_bytes());
+        let _ = stdin.write_all(b"\n");
+    }
+    child
+        .wait_with_output()
+        .is_ok_and(|out| out.status.success())
+}
+
 /// Runs one action as root, and then checks that it happened.
 ///
 /// The check is the point. Every rung of the ladder can report success
-/// without the work being done — a terminal that the person closed, a
-/// prompt they dismissed, a build that failed after authorisation
-/// succeeded — so the exit status is treated as a hint and the state of
-/// the machine as the answer.
-pub fn run_as_root(action: &Action) -> Result<(), String> {
+/// without the work being done — a dismissed prompt, a build that failed
+/// after authorisation succeeded — so the exit status is treated as a hint
+/// and the state of the machine as the answer.
+pub fn run_as_root(action: &Action, secret: Option<&Secret>) -> Result<(), RootFailure> {
     if action.is_already_done() {
         return Ok(());
     }
-    let executable = std::env::current_exe()
-        .map_err(|e| format!("Could not locate the Raven Gaming executable: {e}"))?;
+    let executable = std::env::current_exe().map_err(|e| {
+        RootFailure::Other(format!("Could not locate the Raven Gaming executable: {e}"))
+    })?;
     let escalation = Escalation::detect();
-    let outcome = match &escalation {
+    let outcome = match escalation {
         Escalation::Run0 => Command::new("run0")
             .args([
                 "--unit=raven-gaming-apply".to_string(),
@@ -749,90 +842,90 @@ pub fn run_as_root(action: &Action) -> Result<(), String> {
             ])
             .arg(&executable)
             .args(action.args())
-            .output()
-            .map(|out| {
-                (
-                    out.status.success(),
-                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                )
-            }),
+            .output(),
         Escalation::Pkexec => Command::new("pkexec")
             .arg(&executable)
             .args(action.args())
-            .output()
-            .map(|out| {
-                (
-                    out.status.success(),
-                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                )
-            }),
+            .output(),
         Escalation::SudoNow => Command::new("sudo")
             .arg("-n")
             .arg(&executable)
             .args(action.args())
-            .output()
-            .map(|out| {
-                (
-                    out.status.success(),
-                    String::from_utf8_lossy(&out.stderr).into_owned(),
-                )
-            }),
-        Escalation::SudoTerminal(terminal) => {
-            // `-e` is the xterm convention every one of these follows, and
-            // everything after it is argv — no shell, so nothing here has
-            // to be quoted and nothing can be re-parsed as a command.
-            let mut command = Command::new(terminal);
-            command
-                .arg("-e")
-                .arg("sudo")
-                .arg(&executable)
-                .args(action.args());
-            command
-                .status()
-                .map(|status| (status.success(), String::new()))
+            .output(),
+        Escalation::SudoPassword => {
+            let Some(secret) = secret else {
+                return Err(RootFailure::PasswordNeeded);
+            };
+            sudo_with_password(&executable, action, secret)
         }
-        Escalation::None => return Err(escalation.reason()),
+        Escalation::None => return Err(RootFailure::Other(escalation.reason())),
     };
 
-    let (reported_success, stderr) = outcome.map_err(|e| match &escalation {
-        Escalation::SudoTerminal(terminal) => {
-            format!("Could not open {}: {e}", terminal.display())
-        }
-        _ => format!("Could not request authorization: {e}"),
-    })?;
+    let output =
+        outcome.map_err(|e| RootFailure::Other(format!("Could not request authorization: {e}")))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     // The machine's own answer, which outranks the exit status.
     if action.is_already_done() {
         return Ok(());
     }
+    if wrong_password(&stderr) {
+        return Err(RootFailure::WrongPassword);
+    }
     if stderr.contains("dismissed") || stderr.contains("not authorized") {
-        return Err("Authorisation was not given".into());
+        return Err(RootFailure::Other("Authorisation was not given".into()));
+    }
+    if stderr.contains("is not in the sudoers file") {
+        return Err(RootFailure::Other(
+            "This account is not allowed to use sudo, so it cannot make this change.".into(),
+        ));
     }
     if stderr.contains("PolicyKit1") || stderr.contains("Error getting authority") {
-        return Err(
-            "polkit is not running on this system, so pkexec cannot authorise anything. Raven uses sudo in a terminal instead."
-                .into(),
-        );
+        return Err(RootFailure::Other(
+            "polkit is not running on this system, so pkexec cannot authorise anything.".into(),
+        ));
     }
-    if let Some(line) = last_line(&stderr) {
-        return Err(line.to_string());
-    }
-    if reported_success {
-        Err(format!(
-            "{} reported success, but nothing changed. Running `sudo raven-gaming {}` in a terminal will say why.",
-            match escalation {
-                Escalation::SudoTerminal(_) => "The terminal",
-                _ => "The authorisation",
-            },
-            action.args().join(" ")
-        ))
-    } else {
-        Err(format!(
-            "{} did not complete. Running `sudo raven-gaming {}` in a terminal will say why.",
+    let complaint = stderr.lines().rev().find(|l| !is_sudo_chatter(l));
+    Err(RootFailure::Other(match complaint {
+        Some(line) => line.trim().to_string(),
+        None => format!(
+            "{} did not complete, and said nothing about why. Running `sudo raven-gaming {}` in a terminal will say more.",
             action.description(),
             action.args().join(" ")
-        ))
+        ),
+    }))
+}
+
+/// `sudo -S`, with the password written to its standard input.
+///
+/// `-S` is what makes sudo read the password from stdin rather than from
+/// the terminal, and `-p ""` silences the prompt it would otherwise print
+/// into stderr. The password is never an argument: argv is readable by
+/// every process on the machine through `/proc`.
+fn sudo_with_password(
+    executable: &Path,
+    action: &Action,
+    secret: &Secret,
+) -> std::io::Result<std::process::Output> {
+    let mut child = Command::new("sudo")
+        .args(["-S", "-p", ""])
+        .arg(executable)
+        .args(action.args())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("sudo took no standard input"))?;
+        stdin.write_all(secret.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        // Dropped here, which closes the pipe: sudo waits for end-of-input
+        // before it will decide, and a pipe left open is a hang.
     }
+    child.wait_with_output()
 }
 
 // ---- shader cache --------------------------------------------------------
@@ -1009,14 +1102,10 @@ mod tests {
                 // D-Bus error nobody can act on.
                 assert!(crate::drivers::process_running("polkitd"));
             }
-            Escalation::SudoNow => assert!(which("sudo").is_some()),
-            Escalation::SudoTerminal(terminal) => {
-                assert!(which("sudo").is_some());
-                assert!(terminal.is_file());
+            Escalation::SudoNow | Escalation::SudoPassword => {
+                assert!(which("sudo").is_some())
             }
-            Escalation::None => {
-                assert!(which("sudo").is_none() || TERMINALS.iter().all(|t| which(t).is_none()));
-            }
+            Escalation::None => assert!(which("sudo").is_none()),
         }
     }
 
@@ -1028,23 +1117,85 @@ mod tests {
         // No D-Bus jargon: the point of the reason is that a person can
         // act on it.
         assert!(!reason.contains("StartServiceByName"));
-        // Every other rung has nothing to explain.
-        for rung in [Escalation::Run0, Escalation::Pkexec, Escalation::SudoNow] {
+        for rung in [
+            Escalation::Run0,
+            Escalation::Pkexec,
+            Escalation::SudoNow,
+            Escalation::SudoPassword,
+        ] {
             assert!(rung.reason().is_empty());
         }
     }
 
     #[test]
-    fn only_the_terminal_rung_warns_about_a_terminal() {
-        assert!(
-            Escalation::SudoTerminal(PathBuf::from("/usr/bin/xterm"))
-                .describes_prompt()
-                .is_some_and(|text| text.contains("terminal"))
-        );
+    fn only_the_sudo_rung_asks_this_window_for_a_password() {
+        assert!(Escalation::SudoPassword.needs_password());
+        for rung in [
+            Escalation::Run0,
+            Escalation::Pkexec,
+            Escalation::SudoNow,
+            Escalation::None,
+        ] {
+            assert!(!rung.needs_password(), "{rung:?} should not be prompting");
+        }
         // Already authorised means nothing will be asked, so nothing is
         // promised.
         assert!(Escalation::SudoNow.describes_prompt().is_none());
         assert!(Escalation::None.describes_prompt().is_none());
+    }
+
+    #[test]
+    fn a_password_is_never_asked_for_without_one_to_give() {
+        // The path that needs a password and is handed none must say so
+        // rather than run sudo and hang on its stdin.
+        if Escalation::detect() == Escalation::SudoPassword {
+            let action = Action::DkmsInstall {
+                kernel: "0.0.0-not-a-kernel".into(),
+            };
+            assert_eq!(run_as_root(&action, None), Err(RootFailure::PasswordNeeded));
+        }
+    }
+
+    #[test]
+    fn a_secret_is_wiped_and_never_printed() {
+        let secret = Secret::new("hunter2".to_string());
+        assert_eq!(secret.as_bytes(), b"hunter2");
+        // The one thing that must never happen by accident.
+        assert_eq!(format!("{secret:?}"), "Secret(…)");
+        assert!(!format!("{secret:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn sudos_own_noise_stays_out_of_the_log() {
+        for line in [
+            "[sudo] password for javanstorm: ",
+            "Sorry, try again.",
+            "Password:",
+            "   ",
+            "sudo: 1 incorrect password attempt",
+        ] {
+            assert!(is_sudo_chatter(line), "{line:?} should be filtered");
+        }
+        // A real error from the action itself must get through.
+        assert!(!is_sudo_chatter(
+            "Error! Bad return status for module build"
+        ));
+        assert!(!is_sudo_chatter(
+            "/proc/sys/vm/max_map_count: Permission denied"
+        ));
+    }
+
+    #[test]
+    fn a_rejected_password_is_told_apart_from_a_real_failure() {
+        assert!(wrong_password("Sorry, try again.\n"));
+        assert!(wrong_password("sudo: no password was provided"));
+        assert!(wrong_password("sudo: a password is required"));
+        assert!(!wrong_password("dkms: Bad return status for module build"));
+        assert!(!wrong_password(""));
+        assert_eq!(
+            RootFailure::WrongPassword.message(),
+            "That password was not accepted."
+        );
     }
 
     #[test]

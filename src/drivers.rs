@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::gpu::{DriverKind, Gpu, Vendor};
@@ -29,6 +29,79 @@ pub struct Kernel {
     pub release: String,
     /// Whether this is the one currently booted.
     pub running: bool,
+    /// Whether `depmod` has ever run for it.
+    ///
+    /// `modules.dep` is the index every `modprobe` consults. A kernel
+    /// without one cannot load a single module, however many `.ko` files
+    /// are sitting in its tree — so it is not a kernel to build a driver
+    /// for, it is an installation that was never finished. A stock `linux`
+    /// package pulled in as somebody else's dependency looks exactly like
+    /// this.
+    pub prepared: bool,
+}
+
+impl Kernel {
+    fn directory(&self) -> PathBuf {
+        Path::new("/usr/lib/modules").join(&self.release)
+    }
+
+    /// Whether this kernel has a module on disk, however it got there.
+    ///
+    /// The question is not "did DKMS build it" but "will this kernel find
+    /// a driver". Those differ: a prebuilt package such as `nvidia-open`
+    /// drops ready-made modules into `extramodules/` and DKMS never hears
+    /// about them, so asking `dkms status` alone reports a kernel as
+    /// driverless while the driver sits in its own tree.
+    pub fn has_module(&self, name: &str) -> bool {
+        let dir = self.directory();
+        if let Some(index) = crate::gpu::read_text(dir.join("modules.dep"))
+            && dep_index_lists(&index, name)
+        {
+            return true;
+        }
+        // Not in the index, or there is no index: the places a module can
+        // be without depmod having noticed it.
+        ["extramodules", "updates/dkms", "updates"]
+            .iter()
+            .any(|sub| directory_holds_module(&dir.join(sub), name))
+    }
+}
+
+/// Whether `modules.dep` lists a module.
+///
+/// Each line is `path/to/thing.ko[.zst]: deps…`, so only the part before
+/// the colon is a path, and only its file name is the module.
+fn dep_index_lists(index: &str, name: &str) -> bool {
+    index
+        .lines()
+        .filter_map(|line| line.split(':').next())
+        .any(|path| path_is_module(path, name))
+}
+
+fn directory_holds_module(dir: &Path, name: &str) -> bool {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| path_is_module(&entry.file_name().to_string_lossy(), name))
+}
+
+/// Whether a file name is this module.
+///
+/// Modules are compressed in whatever the distribution prefers — `.ko`,
+/// `.ko.zst`, `.ko.xz`, `.ko.gz` — and hyphens and underscores are
+/// interchangeable in a module name everywhere except in the file name,
+/// where whichever the packager typed is what is on disk.
+fn path_is_module(path: &str, name: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let Some(base) = file.split(".ko").next() else {
+        return false;
+    };
+    if base.len() == file.len() {
+        // No `.ko` in it at all, so not a module.
+        return false;
+    }
+    base.replace('_', "-") == name.replace('_', "-")
 }
 
 /// One DKMS module, for one kernel.
@@ -51,10 +124,12 @@ impl DkmsModule {
 
 /// Every kernel with modules on disk, running one first.
 ///
-/// `/usr/lib/modules` also collects stale directories from removed kernels,
-/// which have no `pkgbase` and no compressed module index. Those are not
-/// kernels anyone can boot and are left out, so the rebuild list does not
-/// offer to build for something that is not there.
+/// `/usr/lib/modules` also collects stale directories from removed
+/// kernels. Those have neither a package name nor a module tree and are
+/// left out entirely; what is left is reported with [`Kernel::prepared`]
+/// saying whether it is finished, rather than silently dropped, because
+/// "this kernel is installed but was never set up" is a different thing
+/// to know than "this kernel has no graphics driver".
 pub fn installed_kernels() -> Vec<Kernel> {
     let running = running_kernel();
     let mut kernels: Vec<Kernel> = fs::read_dir("/usr/lib/modules")
@@ -63,8 +138,12 @@ pub fn installed_kernels() -> Vec<Kernel> {
         .flatten()
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|release| is_bootable_kernel(Path::new("/usr/lib/modules").join(release)))
+        .filter(|release| is_installed_kernel(Path::new("/usr/lib/modules").join(release)))
         .map(|release| Kernel {
+            prepared: Path::new("/usr/lib/modules")
+                .join(&release)
+                .join("modules.dep")
+                .exists(),
             running: release == running,
             release,
         })
@@ -73,7 +152,7 @@ pub fn installed_kernels() -> Vec<Kernel> {
     kernels
 }
 
-fn is_bootable_kernel(dir: impl AsRef<Path>) -> bool {
+fn is_installed_kernel(dir: impl AsRef<Path>) -> bool {
     let dir = dir.as_ref();
     dir.join("pkgbase").exists() || dir.join("modules.dep").exists() || dir.join("kernel").is_dir()
 }
@@ -138,11 +217,21 @@ fn parse_dkms_status(text: &str) -> Vec<DkmsModule> {
     modules
 }
 
-/// The kernels that a DKMS module is missing from, given everything dkms
-/// reported and every kernel on disk.
+/// The kernels that a DKMS module is genuinely missing from.
 ///
-/// A module known to dkms but not installed for a kernel is the reboot that
-/// comes up with no driver. This is the list the rebuild button works from.
+/// A module known to dkms but absent from a kernel is the reboot that
+/// comes up with no driver, and this is the list the rebuild button works
+/// from. Two things keep it honest:
+///
+/// * A kernel is only asked about if it is [`Kernel::prepared`]. An
+///   unfinished install cannot load any module, so building one for it
+///   would be minutes of compiling for a kernel that would not use it.
+/// * A module already on disk counts, whoever put it there. The prebuilt
+///   `nvidia-open` package serves the stock kernel out of `extramodules/`
+///   while `nvidia-open-dkms` serves every other kernel; both installed at
+///   once is an ordinary arrangement, and asking `dkms status` alone
+///   reports the prebuilt kernel as driverless when its driver is right
+///   there.
 pub fn kernels_missing_modules(modules: &[DkmsModule], kernels: &[Kernel]) -> Vec<String> {
     let names: BTreeSet<&str> = modules.iter().map(|m| m.name.as_str()).collect();
     if names.is_empty() {
@@ -150,11 +239,13 @@ pub fn kernels_missing_modules(modules: &[DkmsModule], kernels: &[Kernel]) -> Ve
     }
     kernels
         .iter()
+        .filter(|kernel| kernel.prepared)
         .filter(|kernel| {
             names.iter().any(|name| {
-                !modules
+                let built = modules
                     .iter()
-                    .any(|m| m.name == *name && m.kernel == kernel.release && m.is_installed())
+                    .any(|m| m.name == *name && m.kernel == kernel.release && m.is_installed());
+                !built && !kernel.has_module(name)
             })
         })
         .map(|k| k.release.clone())
@@ -482,49 +573,116 @@ mod tests {
         assert_eq!(parsed.len(), 1);
     }
 
-    #[test]
-    fn a_kernel_with_no_module_built_is_reported() {
-        let modules = parse_dkms_status("nvidia/615.71.09, 6.17.11-raven, x86_64: installed");
-        let kernels = vec![
-            Kernel {
-                release: "6.17.11-raven".into(),
-                running: true,
-            },
-            Kernel {
-                release: "7.2.6-arch2-1".into(),
-                running: false,
-            },
-        ];
-        assert_eq!(
-            kernels_missing_modules(&modules, &kernels),
-            vec!["7.2.6-arch2-1"]
-        );
+    /// A kernel that is not on this machine, so `has_module` always says
+    /// no and the DKMS table alone decides what these tests are about.
+    /// Deliberately not a real release: a name that happens to exist here
+    /// would make the test depend on what is installed.
+    fn absent(release: &str, running: bool) -> Kernel {
+        Kernel {
+            release: release.into(),
+            running,
+            prepared: true,
+        }
     }
 
     #[test]
-    fn nothing_is_missing_when_every_kernel_has_it() {
-        let modules = parse_dkms_status(
-            "nvidia/1.0, 6.17.11-raven, x86_64: installed\nnvidia/1.0, 7.2.6-arch2-1, x86_64: installed",
-        );
+    fn a_kernel_that_depmod_never_ran_for_is_not_asked_to_build() {
+        // The case this was written for: the stock `linux` package pulled
+        // in as a dependency, never set up, never booted. Compiling a
+        // driver for it is minutes of work for a kernel that cannot load
+        // one.
+        let modules = parse_dkms_status("nvidia/1.0, 9.9.9-first, x86_64: installed");
         let kernels = vec![
+            absent("9.9.9-first", true),
             Kernel {
-                release: "6.17.11-raven".into(),
-                running: true,
-            },
-            Kernel {
-                release: "7.2.6-arch2-1".into(),
+                release: "9.9.9-unprepared".into(),
                 running: false,
+                prepared: false,
             },
         ];
         assert!(kernels_missing_modules(&modules, &kernels).is_empty());
     }
 
     #[test]
+    fn a_module_file_counts_however_it_got_there() {
+        // A prebuilt driver package puts ready-made modules in
+        // extramodules/ and tells dkms nothing. Before this, that kernel
+        // was reported as having no driver while the driver sat in its
+        // own tree.
+        let index = "updates/dkms/nvidia.ko: \nkernel/drivers/gpu/drm/drm.ko.zst: \n";
+        assert!(dep_index_lists(index, "nvidia"));
+        assert!(dep_index_lists(index, "drm"));
+        assert!(!dep_index_lists(index, "nouveau"));
+        // Only the part before the colon is a path; a module named in
+        // somebody else's dependency list is not installed by being there.
+        assert!(!dep_index_lists(
+            "kernel/x.ko: kernel/drivers/nvidia.ko\n",
+            "nvidia"
+        ));
+    }
+
+    #[test]
+    fn a_module_is_recognised_however_it_is_compressed() {
+        for file in [
+            "nvidia.ko",
+            "nvidia.ko.zst",
+            "nvidia.ko.xz",
+            "nvidia.ko.gz",
+            "extramodules/nvidia.ko.zst",
+            "/usr/lib/modules/7.2.6/extramodules/nvidia.ko.zst",
+        ] {
+            assert!(path_is_module(file, "nvidia"), "missed {file}");
+        }
+        // Hyphens and underscores are the same module name.
+        assert!(path_is_module("nvidia_drm.ko.zst", "nvidia-drm"));
+        assert!(path_is_module("nvidia-drm.ko", "nvidia_drm"));
+        for file in ["nvidia", "nvidia.txt", "nvidia-uvm.ko", "libnvidia.so"] {
+            assert!(!path_is_module(file, "nvidia"), "matched {file}");
+        }
+    }
+
+    #[test]
+    fn this_machine_agrees_with_what_is_on_disk() {
+        // The regression in full: on the machine this was written on the
+        // running kernel gets nvidia from DKMS and the stock kernel gets
+        // it prebuilt, and neither is missing anything.
+        let modules = dkms_status();
+        for kernel in installed_kernels() {
+            for module in modules.iter().filter(|m| m.kernel == kernel.release) {
+                if module.is_installed() {
+                    assert!(
+                        kernel.has_module(&module.name),
+                        "dkms says {} is installed for {} but it is not on disk",
+                        module.name,
+                        kernel.release
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_kernel_with_no_module_built_is_reported() {
+        let modules = parse_dkms_status("nvidia/615.71.09, 9.9.9-first, x86_64: installed");
+        let kernels = vec![absent("9.9.9-first", true), absent("9.9.9-second", false)];
+        assert_eq!(
+            kernels_missing_modules(&modules, &kernels),
+            vec!["9.9.9-second"]
+        );
+    }
+
+    #[test]
+    fn nothing_is_missing_when_every_kernel_has_it() {
+        let modules = parse_dkms_status(
+            "nvidia/1.0, 9.9.9-first, x86_64: installed\nnvidia/1.0, 9.9.9-second, x86_64: installed",
+        );
+        let kernels = vec![absent("9.9.9-first", true), absent("9.9.9-second", false)];
+        assert!(kernels_missing_modules(&modules, &kernels).is_empty());
+    }
+
+    #[test]
     fn no_dkms_modules_means_nothing_to_rebuild() {
-        let kernels = vec![Kernel {
-            release: "6.17.11-raven".into(),
-            running: true,
-        }];
+        let kernels = vec![absent("6.17.11-raven", true)];
         assert!(kernels_missing_modules(&[], &kernels).is_empty());
     }
 

@@ -114,18 +114,32 @@ only two ways:
   either — `pkexec` is nonetheless *installed*, and on a machine with no
   polkit it fails with a D-Bus error about `StartServiceByName` that means
   nothing to anyone. So the ladder looks for the polkit **daemon**, not the
-  tool, and where neither is available it falls to `sudo`: silently when
-  credentials are already cached, and otherwise in a terminal, which is
-  where `rvn`'s own advice ends up too. This window never asks for a
-  password itself.
+  tool, and where neither is available it falls to `sudo`, with the
+  password asked for **in this window**.
+
+  A program that sends people to a terminal to type their password is
+  teaching them to type it wherever they are told to, so Raven Gaming asks
+  for it itself: a dialog that names what it is authorising, and an answer
+  that goes down a pipe to `sudo -S` and nowhere else. Never an argument —
+  argv is readable by every process on the machine through `/proc` — never
+  an environment variable, and never in the log the task dialog prints,
+  which filters sudo's own prompt out. The password is held in a type that
+  overwrites itself on drop, which is worth doing and not worth
+  overstating: the bytes it owns are cleared, but a `String` that has been
+  moved may have left copies nothing can reach.
+
+  It is checked as soon as it is typed, against a command that does
+  nothing, so a typo is answered in the dialog where it can be retyped
+  rather than surfacing as a job that failed several minutes into a module
+  build. One prompt covers a whole run, and an action that is already done
+  never asks at all.
 
   Every rung can report success without the work having happened — a
-  dismissed prompt, a closed terminal, a build that failed after
-  authorisation succeeded. So the exit status is treated as a hint and the
-  state of the machine as the answer: each action can say whether it is
-  already done, which is checked before asking for root (and skips the
-  prompt entirely when there is nothing to do) and again afterwards as the
-  real test of whether it worked.
+  dismissed prompt, a build that failed after authorisation succeeded. So
+  the exit status is treated as a hint and the state of the machine as the
+  answer: each action can say whether it is already done, checked before
+  asking for root and again afterwards as the real test of whether it
+  worked.
 
 Audio settings need neither: PipeWire takes them from the running session
 and from a file in your own config.
@@ -147,7 +161,7 @@ meantime and the cost of being wrong is somebody's saves.
 | Live AMD and Intel readings | `sysfs` and the card's `hwmon` |
 | Live NVIDIA readings | `nvidia-smi`, one call per tick |
 | Installed packages | `rvn --json list`, or `/var/lib/pacman/local` |
-| Driver modules per kernel | `dkms status` and `/usr/lib/modules` |
+| Driver modules per kernel | `dkms status`, plus the modules on disk in `/usr/lib/modules` |
 | Steam's library | `libraryfolders.vdf` and `appmanifest_*.acf` |
 | Launch options already set | `localconfig.vdf` |
 | Recordings | the `raven-rec` file header, walked without decoding a frame |

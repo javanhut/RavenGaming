@@ -5233,30 +5233,47 @@ fn run_fixes(app: &Rc<App>, fixes: Vec<Fix>) {
         [Fix::ApplyTweaks] => "Applying system settings".to_string(),
         _ => "Setting this computer up for games".to_string(),
     };
-    let view = build_task_view(app, &title);
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut ok = true;
-        for fix in fixes {
-            if !run_one_fix(&fix, &sender) {
-                ok = false;
-                break;
-            }
+    // One prompt for the whole run rather than one per step: a person who
+    // pressed "Fix what is missing" has already said yes to the list.
+    let needs_root = fixes
+        .iter()
+        .any(|fix| matches!(fix, Fix::BuildModules(_) | Fix::ApplyTweaks));
+    let start = {
+        let app = app.clone();
+        let title = title.clone();
+        move |secret: Option<tune::Secret>| {
+            let view = build_task_view(&app, &title);
+            let (sender, receiver) = mpsc::channel();
+            let fixes = fixes.clone();
+            std::thread::spawn(move || {
+                let mut ok = true;
+                for fix in fixes {
+                    if !run_one_fix(&fix, &sender, secret.as_ref()) {
+                        ok = false;
+                        break;
+                    }
+                }
+                let _ = sender.send(TaskEvent::Finished { ok });
+            });
+            poll_task(
+                app.clone(),
+                view,
+                receiver,
+                "Done — everything was rechecked".into(),
+            );
         }
-        let _ = sender.send(TaskEvent::Finished { ok });
-    });
-    poll_task(
-        app.clone(),
-        view,
-        receiver,
-        "Done — everything was rechecked".into(),
-    );
+    };
+    if needs_root {
+        with_root_password(app, &title, start);
+    } else {
+        start(None);
+    }
 }
 
 /// One fix, on the worker thread. `false` stops the rest: a driver that
 /// failed to install must not be followed by an attempt to build its
 /// modules.
-fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>) -> bool {
+fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>, secret: Option<&tune::Secret>) -> bool {
     match fix {
         Fix::Install(packages) => {
             let _ = sender.send(TaskEvent::Stage(format!(
@@ -5317,8 +5334,8 @@ fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>) -> bool {
                 let action = tune::Action::DkmsInstall {
                     kernel: kernel.clone(),
                 };
-                if let Err(error) = tune::run_as_root(&action) {
-                    let _ = sender.send(TaskEvent::Failed(error));
+                if let Err(error) = tune::run_as_root(&action, secret) {
+                    let _ = sender.send(TaskEvent::Failed(error.message()));
                     return false;
                 }
                 let _ = sender.send(TaskEvent::Log(format!("✔ modules built for {kernel}")));
@@ -5330,7 +5347,7 @@ fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>) -> bool {
             if let Some(how) = tune::Escalation::detect().describes_prompt() {
                 let _ = sender.send(TaskEvent::Log(how.to_string()));
             }
-            match tune::run_as_root(&tune::Action::ApplyTweaks) {
+            match tune::run_as_root(&tune::Action::ApplyTweaks, secret) {
                 Ok(()) => {
                     let _ = sender.send(TaskEvent::Log(
                         "✔ settings written, and saved so they survive a reboot".into(),
@@ -5341,7 +5358,7 @@ fn run_one_fix(fix: &Fix, sender: &mpsc::Sender<TaskEvent>) -> bool {
                     true
                 }
                 Err(error) => {
-                    let _ = sender.send(TaskEvent::Failed(error));
+                    let _ = sender.send(TaskEvent::Failed(error.message()));
                     false
                 }
             }
@@ -5361,13 +5378,42 @@ fn run_root_actions(app: &Rc<App>, what: &str, actions: Vec<tune::Action>) {
         app.toast("Something is already running");
         return;
     }
+    // Nothing to change means nothing to authorise, so a switch already in
+    // the position it was clicked into never asks for anything.
+    if actions.iter().all(tune::Action::is_already_done) {
+        app.toast(what);
+        app.refresh();
+        return;
+    }
+    let what = what.to_string();
+    with_root_password(
+        app,
+        &what,
+        glib::clone!(
+            #[strong]
+            app,
+            #[strong]
+            what,
+            #[strong]
+            actions,
+            move |secret| start_root_actions(&app, &what, actions.clone(), secret)
+        ),
+    );
+}
+
+fn start_root_actions(
+    app: &Rc<App>,
+    what: &str,
+    actions: Vec<tune::Action>,
+    secret: Option<tune::Secret>,
+) {
     app.busy.set(true);
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut failure = None;
         for action in actions {
-            if let Err(error) = tune::run_as_root(&action) {
-                failure = Some(error);
+            if let Err(error) = tune::run_as_root(&action, secret.as_ref()) {
+                failure = Some(error.message());
                 break;
             }
         }
@@ -5456,6 +5502,103 @@ fn run_export(app: &Rc<App>, source: std::path::PathBuf, destination: std::path:
         let _ = sender.send(TaskEvent::Finished { ok });
     });
     poll_task(app.clone(), view, receiver, "Exported".into());
+}
+
+// ---- asking for a password -----------------------------------------------
+
+/// Asks for the account password, and hands it back once.
+///
+/// In this window rather than in a terminal, because a program that sends
+/// people to a terminal to type their password is teaching them to type it
+/// wherever they are told to. The dialog says what it is for, and the
+/// answer goes straight to sudo's standard input — never into an argument,
+/// an environment variable, or the log this app prints.
+fn ask_for_password(app: &Rc<App>, what: &str, on_answer: impl Fn(Option<tune::Secret>) + 'static) {
+    ask_for_password_again(app, what, None, Rc::new(on_answer));
+}
+
+/// The same dialog, with room for "that one was wrong" above it.
+fn ask_for_password_again(
+    app: &Rc<App>,
+    what: &str,
+    complaint: Option<&str>,
+    on_answer: Rc<dyn Fn(Option<tune::Secret>)>,
+) {
+    let explanation = format!(
+        "{what} needs to be done as root. Raven Gaming passes what you type straight to sudo and keeps no copy of it."
+    );
+    let body = match complaint {
+        Some(problem) => format!("{problem}\n\n{explanation}"),
+        None => explanation,
+    };
+    let dialog = adw::AlertDialog::new(Some("Administrator password"), Some(&body));
+    let entry = gtk::PasswordEntry::builder()
+        .placeholder_text("Password")
+        .show_peek_icon(true)
+        .activates_default(true)
+        .build();
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("ok", "Authorise");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("cancel");
+    let entry_for_response = entry.clone();
+    let what = what.to_string();
+    // How many goes before giving up, so a stuck loop cannot keep putting
+    // the same dialog back.
+    let attempts = Rc::new(Cell::new(3u8));
+    dialog.connect_response(
+        None,
+        glib::clone!(
+            #[strong]
+            app,
+            move |_, response| {
+                if response != "ok" {
+                    on_answer(None);
+                    return;
+                }
+                let typed = entry_for_response.text().to_string();
+                // Blanked in the widget as well as taken out of it: a
+                // dialog that is dismissed rather than destroyed keeps
+                // its text otherwise.
+                entry_for_response.set_text("");
+                let secret = tune::Secret::new(typed);
+                // Checked here, against a command that does nothing, so a
+                // typo is answered in this dialog rather than as a job
+                // that failed several minutes into a module build.
+                if tune::password_is_accepted(&secret) {
+                    on_answer(Some(secret));
+                    return;
+                }
+                let left = attempts.get().saturating_sub(1);
+                attempts.set(left);
+                if left == 0 {
+                    app.toast("That password was not accepted");
+                    on_answer(None);
+                    return;
+                }
+                ask_for_password_again(
+                    &app,
+                    &what,
+                    Some("That password was not accepted."),
+                    on_answer.clone(),
+                );
+            }
+        ),
+    );
+    dialog.present(Some(&app.window));
+    entry.grab_focus();
+}
+
+/// Asks for a password first when the machine will need one, then runs
+/// `then` with it. Where nothing needs to be typed, `then` runs at once.
+fn with_root_password(app: &Rc<App>, what: &str, then: impl Fn(Option<tune::Secret>) + 'static) {
+    if tune::Escalation::detect().needs_password() {
+        ask_for_password(app, what, then);
+    } else {
+        then(None);
+    }
 }
 
 // ---- confirmations -------------------------------------------------------
