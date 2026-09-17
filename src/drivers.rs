@@ -284,54 +284,6 @@ pub fn requirements(gpus: &[Gpu], installed: &dyn Fn(&str) -> bool) -> Vec<Requi
         .collect()
 }
 
-/// The optional things that make games better rather than possible, and
-/// what each one does. The UI offers these as a list to tick, never
-/// installs them behind the person's back.
-pub fn extras() -> Vec<Requirement> {
-    vec![
-        Requirement::new(
-            "gamemode",
-            "switches the CPU to performance while a game runs, and back when it exits",
-            false,
-        ),
-        Requirement::new(
-            "lib32-gamemode",
-            "lets 32-bit and Proton games ask for the same thing",
-            false,
-        ),
-        Requirement::new(
-            "mangohud",
-            "an in-game overlay for frame rate, frame times and temperatures",
-            false,
-        ),
-        Requirement::new(
-            "lib32-mangohud",
-            "the same overlay inside 32-bit and Proton games",
-            false,
-        ),
-        Requirement::new(
-            "gamescope",
-            "runs a game in its own compositor, so its resolution and refresh rate are its own",
-            false,
-        ),
-        Requirement::new(
-            "steam",
-            "Valve's client, and the Proton compatibility layer that runs Windows games",
-            false,
-        ),
-        Requirement::new(
-            "lutris",
-            "installs and manages games from GOG, Epic, Battle.net and elsewhere",
-            false,
-        ),
-        Requirement::new(
-            "vulkan-tools",
-            "`vkcube` and `vulkaninfo`, for proving the driver works",
-            false,
-        ),
-    ]
-}
-
 // ---- what is installed ---------------------------------------------------
 
 /// Every installed package name, read once.

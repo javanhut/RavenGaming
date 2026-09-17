@@ -104,7 +104,11 @@ pub fn discover() -> Vec<Game> {
 // ---- Steam ---------------------------------------------------------------
 
 /// Where Steam might be, in the order Steam itself looks.
-fn steam_roots() -> Vec<PathBuf> {
+///
+/// Public because the tools page reaches into the same installation for
+/// Proton builds and prefixes, and two modules disagreeing about where
+/// Steam lives is worse than one of them exporting this.
+pub fn steam_roots() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };

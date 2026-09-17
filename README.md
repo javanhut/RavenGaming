@@ -44,6 +44,35 @@ nobody suspects it.
 **Capture** — the recordings Huginn has made, how long each runs, and a
 button that turns one into an MP4 with `raven-export`.
 
+**Audio** — how far behind the picture the sound is, in milliseconds,
+and the buffer size that decides it. PipeWire's default of 1024 frames is
+the right answer for a desktop and the wrong one for a game. Changes go to
+the running server first so a buffer too small for the machine can be heard
+crackling and put back, and are only then written to one file in your own
+config — no password, and deleting it restores the defaults. Also which
+device the sound goes to, and whether the 32-bit audio libraries a Proton
+game needs are installed, since without them the game runs perfectly and in
+total silence.
+
+**Controllers** — what is plugged in, over what, on which driver, with what
+battery, and whether this session can open its event node — which is
+exactly what a game does. Press Test and every button and stick shows up
+live; anything that does not light up there will not work in a game either.
+Also whether the `steam-devices` udev rules are installed, which is the
+usual reason a pad works in Steam and nowhere else.
+
+**Emulators** — sixteen emulators grouped by the console they run, each one
+package away, with the three things they all need from the machine checked
+first. Where a BIOS, firmware or key dump is required it says so; Raven
+Gaming installs emulators and does not supply those.
+
+**Game tools** — the overlays, wrappers and diagnostics, what each one is
+actually for, and whether it is installed. Under them, the real state of
+this machine's Proton: which builds Steam has, and every game prefix with
+its size and the game it belongs to — including the ones left behind by
+games since uninstalled. Protontricks, a file-manager button, and a
+deletion that is guarded four ways and confirmed once.
+
 **Screen sharing** — what a screen share needs and what this desktop has.
 See the note below.
 
@@ -79,8 +108,15 @@ only two ways:
   fixed list of four actions and refuses anything else, so a bug in the
   window cannot become an arbitrary write as root.
 
-Nothing outside your own cache is ever deleted, and the one deletion the
-app offers — clearing a shader cache — is checked against that twice.
+Audio settings need neither: PipeWire takes them from the running session
+and from a file in your own config.
+
+Two things can be deleted, and both are fenced. A shader cache has to
+resolve inside your own `XDG_CACHE_HOME`. A Proton prefix has to be named
+as a Steam app id, sit directly under a `compatdata` belonging to a Steam
+library this machine has, and actually contain a prefix — all four, checked
+again after the confirmation, because the dialog has been open in the
+meantime and the cost of being wrong is somebody's saves.
 
 ## What it reads
 
@@ -101,6 +137,10 @@ app offers — clearing a shader cache — is checked against that twice.
 | How full the games drive is | `statvfs` on the first Steam library |
 | The screen's mode | GDK, which has the compositor's own answer |
 | Game covers | `appcache/librarycache`, where Steam already put them |
+| Audio latency and devices | `pw-metadata` and `pw-dump`, the tools PipeWire ships |
+| Controllers | `/proc/bus/input/devices`, and `/dev/input/eventN` for the tester |
+| Controller batteries | `/sys/class/power_supply`, filtered to `scope = Device` |
+| Proton builds and prefixes | `steamapps/common`, `compatibilitytools.d`, `compatdata` |
 
 A reading that is not available is drawn as a dash and a check that cannot
 be established says so. Nothing reports a state it has not observed.

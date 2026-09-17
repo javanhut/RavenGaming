@@ -39,15 +39,19 @@
 //! machine's vital signs are worth having on every page, not just one.
 
 mod art;
+mod audio;
 mod capture;
 mod checks;
+mod controllers;
 mod desktop;
 mod drivers;
+mod emulators;
 mod games;
 mod gpu;
 mod install;
 mod share;
 mod telemetry;
+mod tools;
 mod tune;
 
 use std::cell::{Cell, RefCell};
@@ -94,10 +98,10 @@ struct Page {
     tip: &'static str,
 }
 
-const PAGES: [Page; 6] = [
+const PAGES: [Page; 10] = [
     Page {
         name: "overview",
-        icon: "input-gaming-symbolic",
+        icon: "view-grid-symbolic",
         label: "Gaming",
         title: "Gaming",
         lede: "Set it up once. Then just play.",
@@ -120,12 +124,44 @@ const PAGES: [Page; 6] = [
         tip: "The memory-mapping limit is the one that stops a big game dead. Everything else here costs smoothness, not startup.",
     },
     Page {
+        name: "audio",
+        icon: "audio-speakers-symbolic",
+        label: "Audio",
+        title: "Audio",
+        lede: "Where the sound goes, and how far behind the picture it is.",
+        tip: "A smaller buffer means the bang arrives with the muzzle flash. Too small and it crackles — the change is applied live so you can hear which.",
+    },
+    Page {
+        name: "controllers",
+        icon: "input-gaming-symbolic",
+        label: "Controllers",
+        title: "Controllers",
+        lede: "What is plugged in, and whether every button on it works.",
+        tip: "A pad that works in Steam and nowhere else is usually the steam-devices udev rules missing, not the pad.",
+    },
+    Page {
         name: "games",
         icon: "applications-games-symbolic",
         label: "Library",
         title: "Library",
         lede: "What is installed, and how each one should be started.",
         tip: "On a laptop with two cards, a game with no launch options runs on the slow one. Paste the line at the top into Steam.",
+    },
+    Page {
+        name: "emulators",
+        icon: "applications-system-symbolic",
+        label: "Emulators",
+        title: "Emulators",
+        lede: "The consoles this machine can play, and what each one needs.",
+        tip: "Most emulators want a controller mapped before they accept any input at all. Several want a BIOS you have to dump yourself.",
+    },
+    Page {
+        name: "tools",
+        icon: "applications-utilities-symbolic",
+        label: "Game tools",
+        title: "Game tools",
+        lede: "Overlays, wrappers, diagnostics, and the Proton prefixes they act on.",
+        tip: "Deleting a game's prefix and letting Proton rebuild it is the oldest fix there is. Saves usually live in the prefix too, so copy them out first.",
     },
     Page {
         name: "capture",
@@ -843,6 +879,42 @@ fn search_index(system: &checks::System) -> Vec<Hit> {
             icon: "applications-games-symbolic",
         });
     }
+    for emulator in emulators::CATALOGUE {
+        hits.push(Hit {
+            page: "emulators",
+            where_: "Emulator",
+            title: emulator.name.to_string(),
+            detail: emulator.systems.to_string(),
+            icon: "applications-system-symbolic",
+        });
+    }
+    for tool in tools::CATALOGUE {
+        hits.push(Hit {
+            page: "tools",
+            where_: tool.kind.title(),
+            title: tool.name.to_string(),
+            detail: tool.what.to_string(),
+            icon: "applications-utilities-symbolic",
+        });
+    }
+    for controller in controllers::discover() {
+        hits.push(Hit {
+            page: "controllers",
+            where_: controller.kind(),
+            title: controller.name.clone(),
+            detail: controller.transport.name().to_string(),
+            icon: "input-gaming-symbolic",
+        });
+    }
+    for device in audio::devices() {
+        hits.push(Hit {
+            page: "audio",
+            where_: if device.is_output { "Output" } else { "Input" },
+            title: device.description.clone(),
+            detail: device.api.clone(),
+            icon: "audio-speakers-symbolic",
+        });
+    }
     for recording in capture::recordings() {
         hits.push(Hit {
             page: "capture",
@@ -1049,6 +1121,10 @@ fn build_page(app: &Rc<App>, name: &str) -> gtk::Widget {
         "graphics" => graphics_page(app),
         "performance" => performance_page(app),
         "games" => games_page(app),
+        "audio" => audio_page(app),
+        "controllers" => controllers_page(app),
+        "emulators" => emulators_page(app),
+        "tools" => tools_page(app),
         "capture" => capture_page(app),
         "sharing" => sharing_page(app),
         other => unreachable!("no such page: {other}"),
@@ -2717,8 +2793,6 @@ fn graphics_page(app: &Rc<App>) -> gtk::Widget {
     vulkan.append(&probe);
     page.append(&vulkan);
 
-    // ---- optional extras ----
-    page.append(&extras_section(app, &system));
     page_scroll(&page)
 }
 
@@ -2979,63 +3053,6 @@ fn dkms_section(app: &Rc<App>, system: &checks::System) -> gtk::Box {
     holder.append(&list);
     holder
 }
-
-fn extras_section(app: &Rc<App>, system: &checks::System) -> gtk::Box {
-    let holder = gtk::Box::new(gtk::Orientation::Vertical, 14);
-    holder.append(&section_title(
-        "Optional extras",
-        "None of these is needed to play. Each one makes something better.",
-    ));
-    let list = card();
-    let mut any_missing = Vec::new();
-    for extra in drivers::extras() {
-        let installed = system.has(&extra.package);
-        if !installed {
-            any_missing.push(extra.package.clone());
-        }
-        let trailing: Option<gtk::Widget> = if installed {
-            let badge = gtk::Label::new(Some("Installed"));
-            badge.add_css_class("badge");
-            badge.add_css_class("installed");
-            Some(badge.upcast())
-        } else {
-            let button = gtk::Button::with_label("Install");
-            button.add_css_class("pill");
-            let package = extra.package.clone();
-            button.connect_clicked(glib::clone!(
-                #[strong]
-                app,
-                move |_| run_fixes(&app, vec![Fix::Install(vec![package.clone()])])
-            ));
-            Some(button.upcast())
-        };
-        list.append(&check_row(
-            if installed {
-                State::Good
-            } else {
-                State::Advisory
-            },
-            &extra.package,
-            &extra.reason,
-            trailing.as_ref(),
-        ));
-    }
-    if any_missing.len() > 1 {
-        let all = gtk::Button::with_label("Install all of them");
-        all.add_css_class("pill");
-        all.add_css_class("suggested-action");
-        all.set_halign(gtk::Align::Start);
-        all.connect_clicked(glib::clone!(
-            #[strong]
-            app,
-            move |_| run_fixes(&app, vec![Fix::Install(any_missing.clone())])
-        ));
-        list.append(&all);
-    }
-    holder.append(&list);
-    holder
-}
-
 // ---- Performance ---------------------------------------------------------
 
 fn performance_page(app: &Rc<App>) -> gtk::Widget {
@@ -3489,6 +3506,1135 @@ fn game_row(
         row.append(&copy);
     }
     row
+}
+
+// ---- Audio ---------------------------------------------------------------
+
+fn audio_page(app: &Rc<App>) -> gtk::Widget {
+    let page = page_box();
+    let engine = audio::Engine::read();
+
+    if !engine.running {
+        return empty_state(
+            "audio-speakers-symbolic",
+            "PipeWire is not running",
+            "Game audio, voice chat and the recorder all go through it. Without it there is nothing here to set.",
+        );
+    }
+
+    // ---- latency ----
+    let latency = engine.latency();
+    let hero = card();
+    hero.add_css_class("capture-hero");
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    text.set_hexpand(true);
+    let title = gtk::Label::new(Some(&format!("Audio is {} behind", latency.text())));
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+    title.add_css_class("panel-title");
+    text.append(&title);
+    let body = gtk::Label::new(Some(
+        "PipeWire holds a buffer of sound before playing it. A big one never stutters and is what a desktop wants; a small one is what a game wants, because the buffer is the gap between the gun firing and the bang.",
+    ));
+    body.set_xalign(0.0);
+    body.set_wrap(true);
+    body.add_css_class("dim-label");
+    text.append(&body);
+    head.append(&text);
+    let verdict = gtk::Label::new(Some(if latency.is_good_for_games() {
+        "Good for games"
+    } else {
+        "Fine for a desktop"
+    }));
+    verdict.add_css_class("badge");
+    verdict.add_css_class(if latency.is_good_for_games() {
+        "installed"
+    } else {
+        "neutral"
+    });
+    verdict.set_valign(gtk::Align::Start);
+    head.append(&verdict);
+    hero.append(&head);
+    page.append(&hero);
+
+    // ---- the two controls ----
+    page.append(&section_title(
+        "Buffer and sample rate",
+        "Applied to the running server the moment they change, so a buffer too small for this machine can be heard crackling and put back. Saving writes one file in your own config — no password, and deleting it restores PipeWire's defaults.",
+    ));
+    let controls = card();
+
+    let quantum_labels: Vec<String> = std::iter::once("Automatic".to_string())
+        .chain(audio::QUANTA.iter().map(|q| {
+            let ms = *q as f64 / engine.rate.max(1) as f64 * 1000.0;
+            format!("{q} frames · {ms:.1} ms")
+        }))
+        .collect();
+    let quantum_row = dropdown_row(
+        "Buffer size",
+        "Smaller is tighter. 256 frames suits most machines from the last decade; below that is for people who can hear the difference and can put up with the risk.",
+        &quantum_labels,
+        if engine.forced_quantum == 0 {
+            0
+        } else {
+            audio::QUANTA
+                .iter()
+                .position(|q| *q == engine.forced_quantum)
+                .map(|i| i + 1)
+                .unwrap_or(0)
+        },
+    );
+    quantum_row.1.connect_selected_notify(glib::clone!(
+        #[strong]
+        app,
+        move |dropdown| {
+            let chosen = match dropdown.selected() {
+                0 => 0,
+                index => audio::QUANTA
+                    .get(index as usize - 1)
+                    .copied()
+                    .unwrap_or_default(),
+            };
+            if chosen == engine.forced_quantum {
+                return;
+            }
+            match audio::apply_quantum(chosen) {
+                Ok(()) => {
+                    app.toast(if chosen == 0 {
+                        "Buffer back to automatic"
+                    } else {
+                        "Buffer changed — listen for crackling before saving"
+                    });
+                    app.refresh();
+                }
+                Err(error) => app.toast(&error),
+            }
+        }
+    ));
+    controls.append(&quantum_row.0);
+
+    let rate_labels: Vec<String> = std::iter::once("Automatic".to_string())
+        .chain(
+            audio::RATES
+                .iter()
+                .map(|r| format!("{} kHz", *r as f64 / 1000.0)),
+        )
+        .collect();
+    let rate_row = dropdown_row(
+        "Sample rate",
+        "48 kHz is what games and PipeWire both assume. Forcing a rate stops PipeWire resampling, which is worth doing only if you know the hardware's own rate.",
+        &rate_labels,
+        if engine.forced_rate == 0 {
+            0
+        } else {
+            audio::RATES
+                .iter()
+                .position(|r| *r == engine.forced_rate)
+                .map(|i| i + 1)
+                .unwrap_or(0)
+        },
+    );
+    rate_row.1.connect_selected_notify(glib::clone!(
+        #[strong]
+        app,
+        move |dropdown| {
+            let chosen = match dropdown.selected() {
+                0 => 0,
+                index => audio::RATES
+                    .get(index as usize - 1)
+                    .copied()
+                    .unwrap_or_default(),
+            };
+            if chosen == engine.forced_rate {
+                return;
+            }
+            match audio::apply_rate(chosen) {
+                Ok(()) => {
+                    app.toast("Sample rate changed");
+                    app.refresh();
+                }
+                Err(error) => app.toast(&error),
+            }
+        }
+    ));
+    controls.append(&rate_row.0);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    buttons.set_halign(gtk::Align::Start);
+    let save = gtk::Button::with_label("Keep these after a reboot");
+    save.add_css_class("pill");
+    save.add_css_class("suggested-action");
+    save.set_sensitive(engine.forced_quantum != 0 || engine.forced_rate != 0);
+    let (forced_quantum, forced_rate) = (engine.forced_quantum, engine.forced_rate);
+    save.connect_clicked(glib::clone!(
+        #[strong]
+        app,
+        move |_| match audio::persist(forced_quantum, forced_rate) {
+            Ok(()) => {
+                app.toast("Saved");
+                app.refresh();
+            }
+            Err(error) => app.toast(&error),
+        }
+    ));
+    buttons.append(&save);
+    if audio::is_persisted() || engine.forced_quantum != 0 || engine.forced_rate != 0 {
+        let restore = gtk::Button::with_label("Restore PipeWire's own settings");
+        restore.add_css_class("pill");
+        restore.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| match audio::restore() {
+                Ok(()) => {
+                    app.toast("Restored");
+                    app.refresh();
+                }
+                Err(error) => app.toast(&error),
+            }
+        ));
+        buttons.append(&restore);
+    }
+    controls.append(&buttons);
+    if audio::is_persisted() {
+        let note = gtk::Label::new(Some(
+            "Saved to ~/.config/pipewire/pipewire.conf.d/99-raven-gaming.conf. Deleting that file is the same as pressing Restore.",
+        ));
+        note.set_xalign(0.0);
+        note.set_wrap(true);
+        note.add_css_class("note");
+        controls.append(&note);
+    }
+    page.append(&controls);
+
+    // ---- devices ----
+    let devices = audio::devices();
+    page.append(&section_title(
+        "Where the sound goes",
+        "A game follows the system default unless it has been told otherwise.",
+    ));
+    let list = card();
+    if devices.is_empty() {
+        list.append(&check_row(
+            State::Unknown,
+            "No devices found",
+            "PipeWire is running but reported no sinks or sources. pw-dump is what this page asks; without it there is nothing to show.",
+            None,
+        ));
+    }
+    for device in &devices {
+        list.append(&audio_device_row(app, device));
+    }
+    page.append(&list);
+
+    // ---- the 32-bit trap ----
+    page.append(&section_title("Sound in 32-bit games", ""));
+    let bits = card();
+    let has32 = audio::has_32bit_audio();
+    let audio32_fix = fix_button(
+        app,
+        &Fix::Install(vec!["lib32-pipewire".into(), "lib32-libpulse".into()]),
+    );
+    bits.append(&check_row(
+        if has32 { State::Good } else { State::Problem },
+        "32-bit audio libraries",
+        if has32 {
+            "Installed, so Proton and older native games can reach the sound server."
+        } else {
+            "Missing. A 32-bit or Proton game will run perfectly and in total silence, and nothing in the game's own settings explains why."
+        },
+        if has32 { None } else { audio32_fix.as_ref() },
+    ));
+    page.append(&bits);
+    page_scroll(&page)
+}
+
+/// A labelled row with a dropdown on the right.
+fn dropdown_row(
+    title: &str,
+    subtitle: &str,
+    options: &[String],
+    selected: usize,
+) -> (gtk::Box, gtk::DropDown) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    row.add_css_class("data-row");
+    let text = section_title(title, subtitle);
+    text.set_hexpand(true);
+    row.append(&text);
+    let labels: Vec<&str> = options.iter().map(String::as_str).collect();
+    let dropdown = gtk::DropDown::new(Some(gtk::StringList::new(&labels)), gtk::Expression::NONE);
+    dropdown.set_valign(gtk::Align::Center);
+    dropdown.set_selected(selected as u32);
+    row.append(&dropdown);
+    (row, dropdown)
+}
+
+fn audio_device_row(app: &Rc<App>, device: &audio::Device) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("data-row");
+    let tile = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tile.add_css_class("nav-icon");
+    tile.add_css_class(if device.is_output { "blue" } else { "teal" });
+    tile.set_valign(gtk::Align::Start);
+    tile.set_hexpand(false);
+    let image = glyph(if device.is_output {
+        "audio-speakers-symbolic"
+    } else {
+        "audio-input-microphone-symbolic"
+    });
+    image.set_halign(gtk::Align::Center);
+    image.set_hexpand(true);
+    tile.append(&image);
+    row.append(&tile);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    text.set_hexpand(true);
+    let name = gtk::Label::new(Some(&device.description));
+    name.set_xalign(0.0);
+    name.set_wrap(true);
+    name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    name.add_css_class("row-title");
+    text.append(&name);
+    let detail = gtk::Label::new(Some(&format!(
+        "{} · {}",
+        if device.is_output { "Output" } else { "Input" },
+        if device.api.is_empty() {
+            "PipeWire"
+        } else {
+            &device.api
+        }
+    )));
+    detail.set_xalign(0.0);
+    detail.add_css_class("dim-label");
+    text.append(&detail);
+    row.append(&text);
+
+    if device.is_default {
+        let badge = gtk::Label::new(Some("Default"));
+        badge.add_css_class("badge");
+        badge.set_valign(gtk::Align::Center);
+        row.append(&badge);
+    } else {
+        let use_it = gtk::Button::with_label("Use this");
+        use_it.add_css_class("pill");
+        use_it.set_valign(gtk::Align::Center);
+        let target = device.clone();
+        use_it.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| match audio::set_default(&target) {
+                Ok(()) => {
+                    app.toast(&format!("Now using {}", target.description));
+                    app.refresh();
+                }
+                Err(error) => app.toast(&error),
+            }
+        ));
+        row.append(&use_it);
+    }
+    row
+}
+
+// ---- Controllers ---------------------------------------------------------
+
+fn controllers_page(app: &Rc<App>) -> gtk::Widget {
+    let page = page_box();
+    let pads = controllers::discover();
+
+    // ---- the system's side, whether or not anything is plugged in ----
+    let rules = controllers::steam_input_rules();
+    let rules_fix = fix_button(app, &Fix::Install(vec!["steam-devices".into()]));
+    let permissions = card();
+    permissions.append(&check_row(
+        if rules { State::Good } else { State::Problem },
+        "Controller permissions",
+        if rules {
+            "The steam-devices udev rules are installed, so any game can open a controller — not only Steam."
+        } else {
+            "The steam-devices udev rules are missing. Controllers work inside Steam, which runs its own helper, and are invisible to everything else — which almost nobody attributes to a missing package."
+        },
+        if rules { None } else { rules_fix.as_ref() },
+    ));
+    page.append(&permissions);
+
+    if pads.is_empty() {
+        page.append(&section_title("Nothing connected", ""));
+        let none = card();
+        none.append(&check_row(
+            State::Advisory,
+            "No controller found",
+            "Plug one in over USB, or pair it over Bluetooth, and it appears here. Xbox, PlayStation, Switch Pro and most third-party pads are driven by the kernel with nothing to install.
+
+Keyboard and mouse work for everything on the Library page; a pad is only required by the emulators.",
+            None,
+        ));
+        page.append(&none);
+        return page_scroll(&page);
+    }
+
+    page.append(&section_title(
+        &match pads.len() {
+            1 => "One controller".to_string(),
+            n => format!("{n} controllers"),
+        },
+        "Press Test to watch the buttons and sticks live — if this window can read them, so can a game.",
+    ));
+    for pad in &pads {
+        page.append(&controller_card(app, pad));
+    }
+    page_scroll(&page)
+}
+
+fn controller_card(app: &Rc<App>, pad: &controllers::Controller) -> gtk::Box {
+    let holder = card();
+    holder.add_css_class("gpu-card");
+
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    let tile = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tile.add_css_class("nav-icon");
+    tile.add_css_class("large");
+    tile.add_css_class(match pad.transport {
+        controllers::Transport::Bluetooth => "indigo",
+        controllers::Transport::Usb => "green",
+        _ => "gray",
+    });
+    tile.set_valign(gtk::Align::Start);
+    tile.set_hexpand(false);
+    let image = glyph("input-gaming-symbolic");
+    image.set_halign(gtk::Align::Center);
+    image.set_hexpand(true);
+    tile.append(&image);
+    head.append(&tile);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    text.set_hexpand(true);
+    let name = gtk::Label::new(Some(&pad.name));
+    name.set_xalign(0.0);
+    name.set_wrap(true);
+    name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    name.add_css_class("gpu-name");
+    text.append(&name);
+    let mut facts = vec![
+        pad.kind().to_string(),
+        pad.transport.name().to_string(),
+        format!("{:04x}:{:04x}", pad.vendor, pad.product),
+        format!("{} buttons · {} axes", pad.buttons, pad.axes),
+    ];
+    if pad.has_rumble {
+        facts.push("rumble".into());
+    }
+    if let Some(driver) = pad.driver() {
+        facts.push(format!("driver {driver}"));
+    }
+    let detail = gtk::Label::new(Some(&facts.join(" · ")));
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    detail.add_css_class("dim-label");
+    text.append(&detail);
+    head.append(&text);
+
+    if let Some(percent) = pad.battery() {
+        let battery = gtk::Label::new(Some(&format!("{percent}%")));
+        battery.add_css_class("badge");
+        battery.add_css_class(if percent < 20 { "warning" } else { "installed" });
+        battery.set_valign(gtk::Align::Start);
+        head.append(&battery);
+    }
+    holder.append(&head);
+
+    let readable = controllers::can_read(pad);
+    holder.append(&check_row(
+        if readable { State::Good } else { State::Problem },
+        "Readable by games",
+        &match &pad.event {
+            Some(path) if readable => format!(
+                "{} can be opened by this session, which is exactly what a game does.",
+                path.display()
+            ),
+            Some(path) => format!(
+                "{} cannot be opened. Being in the `input` group, or having the steam-devices rules installed, is what grants this.",
+                path.display()
+            ),
+            None => "This device has no event node, so nothing can read it.".to_string(),
+        },
+        None,
+    ));
+
+    if readable {
+        let test = gtk::Button::with_label("Test this controller");
+        test.add_css_class("pill");
+        test.add_css_class("suggested-action");
+        test.set_halign(gtk::Align::Start);
+        let target = pad.clone();
+        test.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| open_tester(&app, &target)
+        ));
+        holder.append(&test);
+    }
+    holder
+}
+
+/// A window that shows what the controller is doing, right now.
+fn open_tester(app: &Rc<App>, pad: &controllers::Controller) {
+    let mut reader = match controllers::Reader::open(pad) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let dialog = adw::AlertDialog::new(Some("Cannot read this controller"), Some(&error));
+            dialog.add_response("ok", "OK");
+            dialog.present(Some(&app.window));
+            return;
+        }
+    };
+
+    let dialog = adw::Dialog::new();
+    dialog.set_title(&pad.name);
+    dialog.set_content_width(560);
+    dialog.set_content_height(460);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    body.set_margin_start(20);
+    body.set_margin_end(20);
+    body.set_margin_top(4);
+    body.set_margin_bottom(20);
+
+    let lede = gtk::Label::new(Some(
+        "Press every button and push both sticks to their corners. Anything that does not light up here will not work in a game either.",
+    ));
+    lede.set_xalign(0.0);
+    lede.set_wrap(true);
+    lede.add_css_class("dim-label");
+    body.append(&lede);
+
+    let last = gtk::Label::new(Some("Waiting…"));
+    last.set_xalign(0.0);
+    last.add_css_class("panel-title");
+    body.append(&last);
+
+    let held_label = gtk::Label::new(Some("Nothing held"));
+    held_label.set_xalign(0.0);
+    held_label.set_wrap(true);
+    held_label.add_css_class("dim-label");
+    body.append(&held_label);
+
+    let axes_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&axes_box)
+        .vexpand(true)
+        .build();
+    body.append(&scroller);
+    toolbar.set_content(Some(&body));
+    dialog.set_child(Some(&toolbar));
+    dialog.present(Some(&app.window));
+
+    // Axis bars are made as axes are first seen, so only the ones this
+    // controller actually has appear.
+    let bars: Rc<RefCell<std::collections::BTreeMap<u16, (gtk::LevelBar, gtk::Label)>>> =
+        Rc::new(RefCell::new(std::collections::BTreeMap::new()));
+    let held: Rc<RefCell<std::collections::BTreeSet<u16>>> =
+        Rc::new(RefCell::new(std::collections::BTreeSet::new()));
+    // Axis ranges are per-device and not published in /proc, so the tester
+    // learns them: the extremes seen so far are the extremes of the bar.
+    let range: Rc<RefCell<std::collections::BTreeMap<u16, (i32, i32)>>> =
+        Rc::new(RefCell::new(std::collections::BTreeMap::new()));
+
+    let alive = Rc::new(Cell::new(true));
+    dialog.connect_closed(glib::clone!(
+        #[strong]
+        alive,
+        move |_| alive.set(false)
+    ));
+
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        if !alive.get() {
+            return glib::ControlFlow::Break;
+        }
+        for event in reader.poll() {
+            match event {
+                controllers::Input::Button { code, pressed } => {
+                    let name = controllers::button_name(code);
+                    if pressed {
+                        held.borrow_mut().insert(code);
+                        last.set_text(&name);
+                    } else {
+                        held.borrow_mut().remove(&code);
+                    }
+                    let names: Vec<String> = held
+                        .borrow()
+                        .iter()
+                        .map(|c| controllers::button_name(*c))
+                        .collect();
+                    held_label.set_text(&if names.is_empty() {
+                        "Nothing held".to_string()
+                    } else {
+                        format!("Held: {}", names.join(", "))
+                    });
+                }
+                controllers::Input::Axis { code, value } => {
+                    let mut ranges = range.borrow_mut();
+                    let seen = ranges.entry(code).or_insert((value, value));
+                    seen.0 = seen.0.min(value);
+                    seen.1 = seen.1.max(value);
+                    let (low, high) = *seen;
+                    drop(ranges);
+                    let mut bars = bars.borrow_mut();
+                    let entry = bars.entry(code).or_insert_with(|| {
+                        let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                        let caption = gtk::Label::new(Some(&controllers::axis_name(code)));
+                        caption.set_xalign(0.0);
+                        caption.add_css_class("meter-name");
+                        row.append(&caption);
+                        let bar = gtk::LevelBar::new();
+                        bar.set_min_value(0.0);
+                        bar.set_max_value(1.0);
+                        row.append(&bar);
+                        axes_box.append(&row);
+                        (bar, caption)
+                    });
+                    let span = (high - low).max(1) as f64;
+                    entry
+                        .0
+                        .set_value(((value - low) as f64 / span).clamp(0.0, 1.0));
+                    entry
+                        .1
+                        .set_text(&format!("{} — {value}", controllers::axis_name(code)));
+                }
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+// ---- Emulators -----------------------------------------------------------
+
+fn emulators_page(app: &Rc<App>) -> gtk::Widget {
+    let system = app.system();
+    let page = page_box();
+    let pads = controllers::discover().len();
+
+    page.append(&section_title(
+        "Before anything will run",
+        "Three things every emulator wants from the machine. Each one is dealt with on another page.",
+    ));
+    let needs = card();
+    for prerequisite in emulators::prerequisites(&system.gpus, pads) {
+        let go = gtk::Button::with_label("Open");
+        go.add_css_class("pill");
+        let target = prerequisite.page;
+        go.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| jump_to(&app, target)
+        ));
+        let trailing: Option<gtk::Widget> = if prerequisite.met {
+            None
+        } else {
+            Some(go.upcast())
+        };
+        needs.append(&check_row(
+            if prerequisite.met {
+                State::Good
+            } else {
+                State::Advisory
+            },
+            prerequisite.title,
+            &prerequisite.detail,
+            trailing.as_ref(),
+        ));
+    }
+    page.append(&needs);
+
+    let note = gtk::Label::new(Some(
+        "Raven Gaming installs emulators. It does not supply BIOS images, firmware or keys — those come from hardware you own, and where one is needed it is said below.",
+    ));
+    note.set_xalign(0.0);
+    note.set_wrap(true);
+    note.add_css_class("info-note");
+    page.append(&note);
+
+    let installed = emulators::installed().len();
+    page.append(&section_title(
+        "Emulators",
+        &match installed {
+            0 => "None installed yet. Each one below is a single package.".to_string(),
+            1 => "One installed.".to_string(),
+            n => format!("{n} installed."),
+        },
+    ));
+    for family in emulators::FAMILIES {
+        page.append(&section_title(family.title(), ""));
+        let shelf = card();
+        for emulator in emulators::by_family(family) {
+            shelf.append(&emulator_row(app, emulator, &system));
+        }
+        page.append(&shelf);
+    }
+    page_scroll(&page)
+}
+
+fn emulator_row(
+    app: &Rc<App>,
+    emulator: &'static emulators::Emulator,
+    system: &checks::System,
+) -> gtk::Box {
+    let installed = emulator.is_installed() || system.has(emulator.package);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("data-row");
+
+    let tile = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tile.add_css_class("nav-icon");
+    tile.add_css_class(emulator.family.tint());
+    tile.set_valign(gtk::Align::Start);
+    tile.set_hexpand(false);
+    let image = glyph("applications-system-symbolic");
+    image.set_halign(gtk::Align::Center);
+    image.set_hexpand(true);
+    tile.append(&image);
+    row.append(&tile);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    text.set_hexpand(true);
+    let name = gtk::Label::new(Some(emulator.name));
+    name.set_xalign(0.0);
+    name.add_css_class("row-title");
+    text.append(&name);
+    let systems = gtk::Label::new(Some(emulator.systems));
+    systems.set_xalign(0.0);
+    systems.set_wrap(true);
+    systems.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    systems.add_css_class("dim-label");
+    text.append(&systems);
+    if let Some(caveat) = emulator.caveat {
+        let warning = gtk::Label::new(Some(caveat));
+        warning.set_xalign(0.0);
+        warning.set_wrap(true);
+        warning.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        warning.add_css_class("dim-label");
+        warning.add_css_class("warning");
+        text.append(&warning);
+    }
+    row.append(&text);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_valign(gtk::Align::Center);
+    if installed {
+        if emulator.is_installed() {
+            let launch = gtk::Button::with_label("Open");
+            launch.add_css_class("pill");
+            let binary = emulator.binary;
+            launch.connect_clicked(glib::clone!(
+                #[strong]
+                app,
+                move |_| match run_detached(binary, &[]) {
+                    Ok(()) => app.toast(&format!("Starting {}", emulator.name)),
+                    Err(error) => app.toast(&error),
+                }
+            ));
+            buttons.append(&launch);
+        }
+        let badge = gtk::Label::new(Some("Installed"));
+        badge.add_css_class("badge");
+        badge.add_css_class("installed");
+        badge.set_valign(gtk::Align::Center);
+        buttons.append(&badge);
+    } else {
+        let install = gtk::Button::with_label("Install");
+        install.add_css_class("pill");
+        install.add_css_class("suggested-action");
+        let package = emulator.package.to_string();
+        install.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| run_fixes(&app, vec![Fix::Install(vec![package.clone()])])
+        ));
+        buttons.append(&install);
+    }
+    row.append(&buttons);
+    row
+}
+
+// ---- Game tools ----------------------------------------------------------
+
+fn tools_page(app: &Rc<App>) -> gtk::Widget {
+    let system = app.system();
+    let page = page_box();
+    let packages = |name: &str| system.has(name);
+
+    for kind in tools::KINDS {
+        page.append(&section_title(kind.title(), kind.lede()));
+        let shelf = card();
+        let mut missing: Vec<String> = Vec::new();
+        for tool in tools::by_kind(kind) {
+            if !tool.is_installed(&packages) {
+                missing.push(tool.package.to_string());
+            }
+            shelf.append(&tool_row(app, tool, &packages));
+        }
+        if missing.len() > 1 {
+            let all = gtk::Button::with_label(&format!("Install all {}", missing.len()));
+            all.add_css_class("pill");
+            all.add_css_class("suggested-action");
+            all.set_halign(gtk::Align::Start);
+            all.connect_clicked(glib::clone!(
+                #[strong]
+                app,
+                move |_| run_fixes(&app, vec![Fix::Install(missing.clone())])
+            ));
+            shelf.append(&all);
+        }
+        page.append(&shelf);
+    }
+
+    // ---- probes ----
+    page.append(&section_title(
+        "Ask the system directly",
+        "Each of these runs one read-only command and shows you what it said.",
+    ));
+    let probes = card();
+    for probe in tools::PROBES {
+        let run = gtk::Button::with_label("Run");
+        run.add_css_class("pill");
+        run.set_sensitive(probe.is_available());
+        run.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| show_probe(&app, probe)
+        ));
+        let trailing: gtk::Widget = run.upcast();
+        probes.append(&check_row(
+            if probe.is_available() {
+                State::Good
+            } else {
+                State::Advisory
+            },
+            probe.name,
+            &if probe.is_available() {
+                probe.what.to_string()
+            } else {
+                format!("{} — {} is not installed.", probe.what, probe.binary)
+            },
+            Some(&trailing),
+        ));
+    }
+    page.append(&probes);
+
+    // ---- Proton ----
+    page.append(&proton_section(app));
+    page_scroll(&page)
+}
+
+fn tool_row(
+    app: &Rc<App>,
+    tool: &'static tools::Tool,
+    packages: &dyn Fn(&str) -> bool,
+) -> gtk::Box {
+    let installed = tool.is_installed(packages);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("data-row");
+
+    let tile = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tile.add_css_class("nav-icon");
+    tile.add_css_class(tool.kind.tint());
+    tile.set_valign(gtk::Align::Start);
+    tile.set_hexpand(false);
+    let image = glyph("applications-utilities-symbolic");
+    image.set_halign(gtk::Align::Center);
+    image.set_hexpand(true);
+    tile.append(&image);
+    row.append(&tile);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    text.set_hexpand(true);
+    let name = gtk::Label::new(Some(tool.name));
+    name.set_xalign(0.0);
+    name.add_css_class("row-title");
+    text.append(&name);
+    let what = gtk::Label::new(Some(tool.what));
+    what.set_xalign(0.0);
+    what.set_wrap(true);
+    what.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    what.add_css_class("dim-label");
+    text.append(&what);
+    row.append(&text);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_valign(gtk::Align::Center);
+    if installed {
+        if tool.launchable && drivers::which(tool.binary).is_some() {
+            let open = gtk::Button::with_label("Open");
+            open.add_css_class("pill");
+            let binary = tool.binary;
+            open.connect_clicked(glib::clone!(
+                #[strong]
+                app,
+                move |_| match run_detached(binary, &[]) {
+                    Ok(()) => app.toast(&format!("Starting {}", tool.name)),
+                    Err(error) => app.toast(&error),
+                }
+            ));
+            buttons.append(&open);
+        }
+        let badge = gtk::Label::new(Some("Installed"));
+        badge.add_css_class("badge");
+        badge.add_css_class("installed");
+        badge.set_valign(gtk::Align::Center);
+        buttons.append(&badge);
+    } else {
+        let install = gtk::Button::with_label("Install");
+        install.add_css_class("pill");
+        let package = tool.package.to_string();
+        install.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| run_fixes(&app, vec![Fix::Install(vec![package.clone()])])
+        ));
+        buttons.append(&install);
+    }
+    row.append(&buttons);
+    row
+}
+
+fn show_probe(app: &Rc<App>, probe: tools::Probe) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title(probe.name);
+    dialog.set_content_width(760);
+    dialog.set_content_height(560);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    body.set_margin_start(20);
+    body.set_margin_end(20);
+    body.set_margin_top(4);
+    body.set_margin_bottom(20);
+
+    let text = match probe.run() {
+        Ok(output) => output,
+        Err(error) => format!(
+            "{} did not answer.
+
+{error}",
+            probe.binary
+        ),
+    };
+    let buffer = gtk::TextBuffer::new(None);
+    buffer.set_text(&text);
+    let view = gtk::TextView::with_buffer(&buffer);
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_monospace(true);
+    view.set_left_margin(6);
+    view.set_right_margin(6);
+    view.add_css_class("task-log");
+    let scroller = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .build();
+    body.append(&scroller);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let copy = gtk::Button::with_label("Copy");
+    copy.add_css_class("pill");
+    copy.connect_clicked(glib::clone!(
+        #[strong]
+        app,
+        move |button| {
+            button.clipboard().set_text(&text);
+            app.toast("Copied");
+        }
+    ));
+    buttons.append(&copy);
+    let close = gtk::Button::with_label("Close");
+    close.add_css_class("pill");
+    close.connect_clicked(glib::clone!(
+        #[weak]
+        dialog,
+        move |_| {
+            dialog.close();
+        }
+    ));
+    buttons.append(&close);
+    body.append(&buttons);
+
+    toolbar.set_content(Some(&body));
+    dialog.set_child(Some(&toolbar));
+    dialog.present(Some(&app.window));
+}
+
+fn proton_section(app: &Rc<App>) -> gtk::Box {
+    let holder = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    let builds = tools::proton_builds();
+    holder.append(&section_title(
+        "Proton",
+        "The translation layer that runs Windows games, and the prefix each game keeps its Windows-side files in.",
+    ));
+
+    let list = card();
+    if builds.is_empty() {
+        list.append(&check_row(
+            State::Advisory,
+            "No Proton builds",
+            "Steam downloads one the first time a Windows game is launched. A build installed by hand goes in compatibilitytools.d.",
+            None,
+        ));
+    }
+    for build in &builds {
+        list.append(&check_row(
+            State::Good,
+            &build.name,
+            if build.official {
+                "From Steam."
+            } else {
+                "Installed by hand into compatibilitytools.d."
+            },
+            None,
+        ));
+    }
+    holder.append(&list);
+
+    // Prefixes, named after the games they belong to.
+    let names: std::collections::BTreeMap<String, String> = games::discover()
+        .into_iter()
+        .filter_map(|game| Some((game.app_id?, game.name)))
+        .collect();
+    let prefixes = tools::prefixes(&names);
+    if prefixes.is_empty() {
+        return holder;
+    }
+    holder.append(&section_title(
+        "Game prefixes",
+        "Each game's own C: drive — its settings, its saves and the Windows runtimes installed into it. Deleting one makes Proton build it again from scratch, which is the oldest fix there is, and takes the saves in it with them.",
+    ));
+    let prefix_list = card();
+    for prefix in &prefixes {
+        prefix_list.append(&prefix_row(app, prefix));
+    }
+    holder.append(&prefix_list);
+    holder
+}
+
+fn prefix_row(app: &Rc<App>, prefix: &tools::Prefix) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.add_css_class("data-row");
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    text.set_hexpand(true);
+    let title = gtk::Label::new(Some(&prefix.title()));
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+    title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    title.add_css_class("row-title");
+    text.append(&title);
+    let detail = gtk::Label::new(Some(&format!(
+        "{} · app {}{}",
+        tune::human_bytes(prefix.bytes),
+        prefix.app_id,
+        if prefix.game.is_none() {
+            " · the game is no longer installed"
+        } else {
+            ""
+        }
+    )));
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.add_css_class("dim-label");
+    text.append(&detail);
+    row.append(&text);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_valign(gtk::Align::Center);
+    if drivers::which("protontricks").is_some() {
+        let tricks = gtk::Button::with_label("Protontricks");
+        tricks.add_css_class("pill");
+        let app_id = prefix.app_id.clone();
+        tricks.connect_clicked(glib::clone!(
+            #[strong]
+            app,
+            move |_| match tools::protontricks(&app_id) {
+                Ok(()) => app.toast("Opening protontricks"),
+                Err(error) => app.toast(&error),
+            }
+        ));
+        buttons.append(&tricks);
+    }
+    let open = gtk::Button::from_icon_name(&icon_name("folder-open-symbolic"));
+    open.add_css_class("flat");
+    open.set_tooltip_text(Some("Show in the file manager"));
+    let path = prefix.path.clone();
+    open.connect_clicked(glib::clone!(
+        #[strong]
+        app,
+        move |_| {
+            if let Err(error) = capture::open_in_file_manager(&path) {
+                app.toast(&error);
+            }
+        }
+    ));
+    buttons.append(&open);
+
+    let delete = gtk::Button::from_icon_name(&icon_name("user-trash-symbolic"));
+    delete.add_css_class("flat");
+    delete.set_tooltip_text(Some("Delete this prefix"));
+    let doomed = prefix.clone();
+    delete.connect_clicked(glib::clone!(
+        #[strong]
+        app,
+        move |_| confirm_delete_prefix(&app, doomed.clone())
+    ));
+    buttons.append(&delete);
+    row.append(&buttons);
+    row
+}
+
+fn confirm_delete_prefix(app: &Rc<App>, prefix: tools::Prefix) {
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Delete the prefix for {}?", prefix.title())),
+        Some(&format!(
+            "{} is removed for good. Proton builds a new one the next time the game starts, which resolves a lot of things that have gone wrong — and loses every setting, every installed runtime, and any save the game kept inside the prefix rather than in the cloud.",
+            tune::human_bytes(prefix.bytes)
+        )),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("open", "Show me first");
+    dialog.add_response("delete", "Delete");
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(
+        None,
+        glib::clone!(
+            #[strong]
+            app,
+            move |_, response| match response {
+                "open" => {
+                    if let Err(error) = capture::open_in_file_manager(&prefix.path) {
+                        app.toast(&error);
+                    }
+                }
+                "delete" => {
+                    // Checked again on the way out: the dialog has been
+                    // open, and the cost of being wrong is somebody's
+                    // files.
+                    if !tools::is_deletable_prefix(&prefix.path) {
+                        app.toast("That is not a Proton prefix, so it was not touched");
+                        return;
+                    }
+                    match std::fs::remove_dir_all(&prefix.path) {
+                        Ok(()) => {
+                            app.toast("Prefix deleted");
+                            app.refresh();
+                        }
+                        Err(error) => app.toast(&format!("Could not delete it: {error}")),
+                    }
+                }
+                _ => {}
+            }
+        ),
+    );
+    dialog.present(Some(&app.window));
 }
 
 // ---- Capture -------------------------------------------------------------
@@ -4459,7 +5605,16 @@ mod tests {
             assert!(
                 matches!(
                     page.name,
-                    "overview" | "graphics" | "performance" | "games" | "capture" | "sharing"
+                    "overview"
+                        | "graphics"
+                        | "performance"
+                        | "audio"
+                        | "controllers"
+                        | "games"
+                        | "emulators"
+                        | "tools"
+                        | "capture"
+                        | "sharing"
                 ),
                 "{} has no builder",
                 page.name
