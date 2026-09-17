@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Raven Gaming
+Comment=Graphics drivers, performance settings and gameplay capture
+Exec=raven-gaming
+Icon=applications-games-symbolic
+Terminal=false
+Type=Application
+Categories=Settings;System;Game;
+Keywords=Game;Gaming;GPU;Graphics;Driver;NVIDIA;AMD;Vulkan;Steam;Proton;Record;Capture;
+StartupNotify=true

@@ -1,0 +1,356 @@
+/* Raven Gaming's own classes, layered over raven-glass.css.
+   ─────────────────────────────────────────────────────────────────────────
+   The shared sheet supplies the material — translucent surfaces, hairline
+   borders, the radius scale, the accent's two jobs. This file supplies the
+   things a gaming window has and a settings window does not: a painted
+   backdrop to sit the glass on, a hero banner, a shelf of covers, and a
+   rail of live gauges.
+
+   One deliberate departure from the shared palette: the window's own base
+   is a deep blue-black rather than the shared neutral, because everything
+   in it is drawn over a painted night scene and a grey base shows through
+   the glass as a haze. Every *component* — cards, rows, badges, controls —
+   keeps the shared colours, so a button here is the same button as in
+   Raven Settings.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* The base is painted by a drawing area filling the window, so the window
+   itself only has to be the right colour underneath it — opaque normally,
+   and out of the way entirely when the desktop's transparency is on, where
+   the drawing supplies the alpha instead. */
+window.raven { background-color: #090b12; }
+window.raven.glass { background-color: transparent; }
+window.raven.glass .sidebar { background-color: transparent; }
+.app-root { border-radius: 14px; }
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+.sidebar {
+  background-color: alpha(#05070e, 0.42);
+  border-right: 1px solid alpha(#ffffff, 0.06);
+  padding: 20px 14px 0 14px;
+}
+.sidebar .brand { margin: 4px 6px 20px 6px; }
+.sidebar .brand image { -gtk-icon-size: 34px; color: @accent_bg_color; }
+.sidebar .app-title { font-size: 19px; font-weight: 700; letter-spacing: -0.3px; }
+.sidebar .app-subtitle { font-size: 12.5px; color: alpha(@window_fg_color, 0.55); }
+
+/* A nav row is a pill, and the selected one is the accent's first job.
+   The glyph is a plain symbolic icon rather than a tinted tile: this
+   sidebar is a place to be, not a list of unrelated domains. */
+.sidebar list.navigation-sidebar row {
+  min-height: 42px;
+  border-radius: 12px;
+  padding: 0 12px;
+  margin: 2px 0;
+  transition: background-color 130ms ease-out;
+}
+.sidebar list.navigation-sidebar row label { font-size: 14.5px; font-weight: 500; }
+.nav-glyph { -gtk-icon-size: 17px; color: alpha(@window_fg_color, 0.52); }
+.sidebar list.navigation-sidebar row:hover { background-color: alpha(#ffffff, 0.055); }
+.sidebar list.navigation-sidebar row:hover .nav-glyph { color: alpha(@window_fg_color, 0.85); }
+.sidebar list.navigation-sidebar row:selected {
+  background-image: linear-gradient(100deg, alpha(@accent_bg_color, 0.30), alpha(@accent_bg_color, 0.13));
+  border: 1px solid alpha(@accent_bg_color, 0.42);
+  box-shadow: inset 3px 0 0 @accent_bg_color, 0 4px 16px alpha(@accent_bg_color, 0.18);
+  padding: 0 11px;
+}
+.sidebar list.navigation-sidebar row:selected label { color: #ffffff; font-weight: 600; }
+.sidebar list.navigation-sidebar row:selected .nav-glyph { color: #ffffff; }
+
+/* The foot of the sidebar: a painted ridge with the line over it. */
+.sidebar-note {
+  font-size: 14px;
+  font-weight: 500;
+  color: alpha(@window_fg_color, 0.62);
+  margin: 0 8px 6px 8px;
+}
+.sidebar-rule {
+  min-height: 2px;
+  min-width: 26px;
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.30);
+  margin: 0 8px 18px 8px;
+}
+
+/* ── Window controls, floating over the content ──────────────────────── */
+.window-controls { margin: 12px 14px 0 0; }
+.window-controls button {
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  min-width: 26px;
+  min-height: 26px;
+  color: alpha(@window_fg_color, 0.62);
+}
+.window-controls button:hover { background-color: alpha(#ffffff, 0.10); color: @window_fg_color; }
+
+/* ── Page header ─────────────────────────────────────────────────────── */
+.page-header { padding: 18px 32px 16px 32px; }
+.page-heading { font-size: 33px; font-weight: 800; letter-spacing: -1.1px; }
+.page-lede { font-size: 14.5px; color: alpha(@window_fg_color, 0.58); }
+.wordmark-name { font-size: 13.5px; font-weight: 600; color: alpha(@window_fg_color, 0.78); }
+.wordmark-line { font-size: 12.5px; color: alpha(@window_fg_color, 0.45); }
+.search-field {
+  min-height: 42px;
+  border-radius: 12px;
+  background-color: alpha(#ffffff, 0.055);
+  border: 1px solid alpha(#ffffff, 0.08);
+  padding: 0 12px;
+}
+.search-field:focus-within {
+  border-color: alpha(@accent_bg_color, 0.65);
+  box-shadow: 0 0 0 3px alpha(@accent_bg_color, 0.18);
+}
+.search-field image { color: alpha(@window_fg_color, 0.45); -gtk-icon-size: 16px; }
+.search-field text { color: @window_fg_color; }
+
+/* ── Pages ───────────────────────────────────────────────────────────── */
+.page { padding: 4px 32px 34px 32px; }
+.rail-scroll { padding: 0 24px 34px 4px; }
+.rail { min-width: 272px; }
+
+/* ── Hero ────────────────────────────────────────────────────────────── */
+/* The frame clips the painting to the radius; the slide is what sits on
+   top of it. */
+.hero-frame {
+  border-radius: 20px;
+  border: 1px solid alpha(#ffffff, 0.09);
+  box-shadow: 0 18px 40px alpha(#000000, 0.38), inset 0 1px 0 alpha(#ffffff, 0.10);
+}
+.hero-slide { padding: 34px 36px 26px 36px; }
+.hero-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+  color: alpha(#ffffff, 0.62);
+}
+.hero-title { font-size: 34px; font-weight: 800; letter-spacing: -1px; color: #ffffff; }
+.hero-lede { font-size: 15px; color: alpha(#ffffff, 0.74); }
+.cta {
+  min-height: 44px;
+  border-radius: 999px;
+  padding: 0 22px;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: #ffffff;
+  background-image: linear-gradient(120deg, alpha(@accent_bg_color, 0.95), alpha(@accent_bg_color, 0.62));
+  border: 1px solid alpha(#ffffff, 0.28);
+  box-shadow: 0 10px 26px alpha(@accent_bg_color, 0.42), inset 0 1px 0 alpha(#ffffff, 0.30);
+}
+.cta:hover { background-image: linear-gradient(120deg, alpha(@accent_bg_color, 1.0), alpha(@accent_bg_color, 0.76)); }
+.cta:active { box-shadow: inset 0 2px 5px alpha(#000000, 0.30); }
+.cta:disabled { opacity: 0.6; }
+
+.hero-feature-icon {
+  min-width: 38px;
+  min-height: 38px;
+  border-radius: 999px;
+  background-color: alpha(#ffffff, 0.12);
+  border: 1px solid alpha(#ffffff, 0.16);
+}
+.hero-feature-icon image { color: #ffffff; -gtk-icon-size: 17px; }
+.hero-feature-title { font-size: 14.5px; font-weight: 600; color: #ffffff; }
+.hero-feature-sub { font-size: 12.5px; color: alpha(#ffffff, 0.62); }
+.hero-dots { padding: 0 0 15px 0; }
+.hero-dot {
+  min-width: 8px;
+  min-height: 8px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: alpha(#ffffff, 0.28);
+  border: none;
+  box-shadow: none;
+  transition: background-color 140ms ease-out;
+}
+.hero-dot:hover { background-color: alpha(#ffffff, 0.55); }
+.hero-dot.on { background-color: #ffffff; }
+
+/* ── Quick cards ─────────────────────────────────────────────────────── */
+.quick-card {
+  border-radius: 16px;
+  padding: 15px 16px;
+  background-color: alpha(#ffffff, 0.05);
+  border: 1px solid alpha(#ffffff, 0.075);
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.06);
+  min-height: 108px;
+}
+.quick-tile {
+  min-width: 38px;
+  min-height: 38px;
+  border-radius: 11px;
+  background-color: alpha(@accent_bg_color, 0.18);
+  border: 1px solid alpha(@accent_bg_color, 0.26);
+}
+.quick-tile image { color: @accent_bg_color; -gtk-icon-size: 18px; }
+.quick-tile.is-on { background-color: alpha(@accent_bg_color, 0.30); }
+.quick-eyebrow { font-size: 13.5px; font-weight: 600; color: alpha(@window_fg_color, 0.92); }
+.quick-value { font-size: 14px; font-weight: 600; color: @accent_bg_color; }
+.quick-foot { font-size: 12px; color: alpha(@window_fg_color, 0.50); }
+.quick-card dropdown > button {
+  min-height: 28px;
+  padding: 0 6px 0 10px;
+  background-color: transparent;
+  border-color: transparent;
+}
+.quick-card dropdown > button:hover { background-color: alpha(#ffffff, 0.08); }
+
+/* ── Shelf of games ──────────────────────────────────────────────────── */
+.shelf {
+  border-radius: 18px;
+  padding: 18px 18px 20px 18px;
+  background-color: alpha(#ffffff, 0.04);
+  border: 1px solid alpha(#ffffff, 0.07);
+}
+.shelf-title { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+.link-button {
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: alpha(@window_fg_color, 0.70);
+  font-size: 13.5px;
+  padding: 0 6px;
+}
+.link-button:hover { background-color: alpha(#ffffff, 0.08); color: @window_fg_color; }
+
+.game-tile {
+  border-radius: 14px;
+  border: 1px solid alpha(#ffffff, 0.09);
+  background-color: alpha(#0a0c14, 0.7);
+  box-shadow: 0 8px 20px alpha(#000000, 0.34);
+  transition: box-shadow 140ms ease-out, border-color 140ms ease-out;
+}
+.game-tile:hover { border-color: alpha(@accent_bg_color, 0.55); box-shadow: 0 10px 26px alpha(#000000, 0.46); }
+/* No cover on disk: a lettered plate rather than a grey hole. */
+.cover-fallback { background-image: linear-gradient(150deg, #2a2050, #16203f 55%, #10131f); }
+.cover-letter { font-size: 44px; font-weight: 800; color: alpha(#ffffff, 0.30); }
+.cover-scrim {
+  background-image: linear-gradient(to top, alpha(#05060c, 0.94) 0%, alpha(#05060c, 0.78) 42%, alpha(#05060c, 0.0) 100%);
+  padding: 22px 10px 9px 10px;
+}
+.game-name { font-size: 13px; font-weight: 600; color: #ffffff; }
+.game-note { font-size: 11.5px; color: alpha(#ffffff, 0.58); }
+.play {
+  min-width: 34px;
+  min-height: 34px;
+  border-radius: 999px;
+  padding: 0;
+  background-color: alpha(@accent_bg_color, 0.92);
+  border: 1px solid alpha(#ffffff, 0.24);
+  box-shadow: 0 4px 12px alpha(#000000, 0.45);
+  color: #ffffff;
+}
+.play:hover { background-color: @accent_bg_color; }
+/* A MenuButton wraps a real button, and that inner button is the thing
+   that draws. Styling only the outer widget leaves a square button inside
+   a round one. */
+.tile-menu, .tile-menu > button {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 999px;
+  padding: 0;
+  background-color: alpha(#ffffff, 0.14);
+  border: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+.tile-menu { background-color: transparent; }
+.tile-menu > button:hover { background-color: alpha(#ffffff, 0.26); }
+
+/* ── The rail ────────────────────────────────────────────────────────── */
+.rail-card {
+  border-radius: 18px;
+  padding: 17px 18px;
+  background-color: alpha(#ffffff, 0.045);
+  border: 1px solid alpha(#ffffff, 0.075);
+  box-shadow: inset 0 1px 0 alpha(#ffffff, 0.06);
+}
+.rail-title { font-size: 15.5px; font-weight: 700; letter-spacing: -0.2px; }
+.rail-lede { font-size: 13px; color: alpha(@window_fg_color, 0.62); }
+.status-pip { -gtk-icon-size: 20px; }
+.status-pip.good { color: @success_color; }
+.status-pip.warn { color: @warning_color; }
+.ring-value { font-size: 12.5px; font-weight: 700; }
+.ring-caption { font-size: 11.5px; color: alpha(@window_fg_color, 0.55); }
+.meter-name { font-size: 12px; font-weight: 600; color: alpha(@window_fg_color, 0.80); }
+.meter-value { font-size: 11.5px; color: alpha(@window_fg_color, 0.52); }
+.rail-card progressbar trough { min-height: 7px; background-color: alpha(#ffffff, 0.10); }
+.rail-card progressbar progress { min-height: 7px; }
+
+.action-row {
+  border-radius: 10px;
+  padding: 7px 8px;
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.action-row:hover { background-color: alpha(#ffffff, 0.07); }
+.action-row image { -gtk-icon-size: 18px; }
+.action-label { font-size: 13.5px; }
+
+.tip-card {
+  border-radius: 18px;
+  padding: 17px 18px;
+  background-image: linear-gradient(145deg, alpha(@accent_bg_color, 0.20), alpha(@accent_bg_color, 0.07));
+  border: 1px solid alpha(@accent_bg_color, 0.30);
+}
+.tip-card .tip-icon { color: @accent_bg_color; -gtk-icon-size: 18px; }
+.tip-title { font-size: 14.5px; font-weight: 700; }
+.tip-body { font-size: 12.5px; color: alpha(@window_fg_color, 0.72); }
+.tip-rule {
+  min-height: 3px;
+  min-width: 46px;
+  border-radius: 999px;
+  background-color: @accent_bg_color;
+  margin-top: 4px;
+}
+
+/* ── Furniture the other pages share ─────────────────────────────────── */
+.card {
+  border-radius: 16px;
+  padding: 18px 20px;
+  background-color: alpha(#ffffff, 0.045);
+  border: 1px solid alpha(#ffffff, 0.075);
+}
+.section-title { font-size: 16px; font-weight: 700; letter-spacing: -0.2px; }
+.row-title { font-weight: 600; }
+.dim-label { font-size: 13px; letter-spacing: 0.1px; }
+.accent-text { color: @accent_bg_color; }
+.metric-card { min-height: 126px; padding: 15px 16px; }
+.stat-value { font-size: 20px; font-weight: 700; letter-spacing: -0.4px; }
+
+.gpu-card { padding: 18px 20px; }
+.gpu-name { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; }
+.nav-icon.large { min-width: 38px; min-height: 38px; border-radius: 11px; }
+.nav-icon.large image { -gtk-icon-size: 19px; }
+
+.command-row {
+  background-color: alpha(#000000, 0.30);
+  border: 1px solid alpha(#ffffff, 0.07);
+  border-radius: 10px;
+  padding: 10px 8px 10px 14px;
+}
+.command-row label.mono { font-size: 12.5px; }
+.set-options { font-size: 12px; color: alpha(@window_fg_color, 0.70); }
+.bullet-row { padding: 2px 0; }
+.bullet-row image { -gtk-icon-size: 14px; }
+
+.capture-hero { padding: 20px 22px; }
+/* A panel heading, between a section title and a hero title. */
+.panel-title { font-size: 21px; font-weight: 700; letter-spacing: -0.5px; }
+.record-dot {
+  min-width: 14px;
+  min-height: 14px;
+  border-radius: 999px;
+  background-color: #ff453a;
+  box-shadow: 0 0 0 5px alpha(#ff453a, 0.18);
+  margin: 6px;
+}
+.record-dot.idle { background-color: alpha(#ffffff, 0.22); box-shadow: none; }
+
+.task-log {
+  font-size: 12px;
+  background-color: alpha(#000000, 0.30);
+  color: alpha(@window_fg_color, 0.85);
+  border-radius: 10px;
+  padding: 8px 2px;
+}
