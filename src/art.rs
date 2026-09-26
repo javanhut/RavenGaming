@@ -315,15 +315,22 @@ pub fn hero(cr: &cairo::Context, width: f64, height: f64, accent: Rgb) {
 /// The wash behind the whole window: a dark base, two soft clouds of
 /// colour, and a low ridge along the bottom. Everything else in the window
 /// is translucent glass sitting on this, which is where the depth comes
-/// from.
-pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb) {
+/// from. `light` is the desktop's light mode: the same scene at dawn, pale
+/// enough for Raven's dark text to sit on.
+pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb, light: bool) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
     let base = cairo::LinearGradient::new(0.0, 0.0, width * 0.35, height);
-    base.add_color_stop_rgba(0.0, 0.035, 0.043, 0.078, 1.0);
-    base.add_color_stop_rgba(0.55, 0.043, 0.047, 0.086, 1.0);
-    base.add_color_stop_rgba(1.0, 0.055, 0.043, 0.098, 1.0);
+    if light {
+        base.add_color_stop_rgba(0.0, 0.953, 0.957, 0.976, 1.0);
+        base.add_color_stop_rgba(0.55, 0.937, 0.941, 0.965, 1.0);
+        base.add_color_stop_rgba(1.0, 0.929, 0.918, 0.957, 1.0);
+    } else {
+        base.add_color_stop_rgba(0.0, 0.035, 0.043, 0.078, 1.0);
+        base.add_color_stop_rgba(0.55, 0.043, 0.047, 0.086, 1.0);
+        base.add_color_stop_rgba(1.0, 0.055, 0.043, 0.098, 1.0);
+    }
     let _ = cr.set_source(&base);
     let _ = cr.paint();
 
@@ -339,9 +346,9 @@ pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb) {
         height * 1.02,
         height * 0.85,
         accent.mix(Rgb::new(0.55, 0.25, 0.85), 0.55),
-        0.22,
+        if light { 0.16 } else { 0.22 },
     );
-    cloud(width * 0.92, height * -0.06, height * 0.70, accent, 0.14);
+    cloud(width * 0.92, height * -0.06, height * 0.70, accent, if light { 0.12 } else { 0.14 });
 
     // A ridge along the foot of the window, mostly hidden behind the
     // cards — it is there to give the bottom of the sidebar somewhere to
@@ -354,14 +361,19 @@ pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb) {
             seed: 0x7777,
             base: 1.26,
             amplitude: 0.20,
-            colour: Rgb::new(0.043, 0.035, 0.086),
+            colour: if light {
+                Rgb::new(0.855, 0.843, 0.906)
+            } else {
+                Rgb::new(0.043, 0.035, 0.086)
+            },
             alpha: 0.9,
         },
     );
 }
 
-/// The smaller version at the foot of the sidebar.
-pub fn sidebar_footer(cr: &cairo::Context, width: f64, height: f64, accent: Rgb) {
+/// The smaller version at the foot of the sidebar. In `light` the ridges
+/// are pale, because the sidebar's dark note is drawn over them.
+pub fn sidebar_footer(cr: &cairo::Context, width: f64, height: f64, accent: Rgb, light: bool) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
@@ -377,13 +389,17 @@ pub fn sidebar_footer(cr: &cairo::Context, width: f64, height: f64, accent: Rgb)
             base: 1.05,
             amplitude: 0.55,
             colour: Rgb::new(0.35, 0.24, 0.52),
-            alpha: 0.35,
+            alpha: if light { 0.14 } else { 0.35 },
         },
         Layer {
             seed: 0x6262,
             base: 1.18,
             amplitude: 0.50,
-            colour: Rgb::new(0.13, 0.10, 0.24),
+            colour: if light {
+                Rgb::new(0.80, 0.78, 0.88)
+            } else {
+                Rgb::new(0.13, 0.10, 0.24)
+            },
             alpha: 0.75,
         },
     ] {
@@ -394,8 +410,9 @@ pub fn sidebar_footer(cr: &cairo::Context, width: f64, height: f64, accent: Rgb)
 // ---- gauges --------------------------------------------------------------
 
 /// A ring gauge: a faint full circle, and an arc over it for the value,
-/// starting at twelve o'clock and going clockwise.
-pub fn ring(cr: &cairo::Context, size: f64, fraction: f64, colour: Rgb) {
+/// starting at twelve o'clock and going clockwise. The faint circle is
+/// white on dark and black on `light`.
+pub fn ring(cr: &cairo::Context, size: f64, fraction: f64, colour: Rgb, light: bool) {
     let stroke = (size * 0.10).clamp(3.0, 6.0);
     let radius = (size - stroke) / 2.0;
     let (cx, cy) = (size / 2.0, size / 2.0);
@@ -406,7 +423,11 @@ pub fn ring(cr: &cairo::Context, size: f64, fraction: f64, colour: Rgb) {
     cr.set_line_cap(cairo::LineCap::Round);
 
     cr.arc(cx, cy, radius, 0.0, TAU);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
+    if light {
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.10);
+    } else {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.10);
+    }
     let _ = cr.stroke();
 
     let fraction = fraction.clamp(0.0, 1.0);
@@ -527,9 +548,29 @@ mod tests {
         let cr = cairo::Context::new(&surface).unwrap();
         let accent = Rgb::fallback();
         hero(&cr, 0.0, 0.0, accent);
-        backdrop(&cr, 0.0, 0.0, accent);
-        sidebar_footer(&cr, -5.0, 10.0, accent);
-        ring(&cr, 0.0, 0.5, accent);
+        for light in [false, true] {
+            backdrop(&cr, 0.0, 0.0, accent, light);
+            sidebar_footer(&cr, -5.0, 10.0, accent, light);
+            ring(&cr, 0.0, 0.5, accent, light);
+        }
+    }
+
+    #[test]
+    fn the_light_backdrop_is_pale_and_the_dark_one_is_not() {
+        // Sampled near the top, clear of the ridge along the foot.
+        let top_left = |light: bool| {
+            let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, 64, 64).unwrap();
+            {
+                let cr = cairo::Context::new(&surface).unwrap();
+                backdrop(&cr, 64.0, 64.0, Rgb::fallback(), light);
+            }
+            surface.flush();
+            let data = surface.data().unwrap();
+            // Rgb24 is BGRx in memory on little-endian; green is byte 1.
+            data[1] as f64 / 255.0
+        };
+        assert!(top_left(true) > 0.8);
+        assert!(top_left(false) < 0.2);
     }
 
     #[test]
@@ -540,7 +581,7 @@ mod tests {
         let cr = cairo::Context::new(&surface).unwrap();
         let before = cr.clip_extents().unwrap();
         hero(&cr, 64.0, 48.0, Rgb::fallback());
-        sidebar_footer(&cr, 64.0, 48.0, Rgb::fallback());
+        sidebar_footer(&cr, 64.0, 48.0, Rgb::fallback(), false);
         let after = cr.clip_extents().unwrap();
         assert_eq!(before, after);
     }

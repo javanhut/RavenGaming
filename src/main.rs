@@ -316,8 +316,6 @@ struct App {
     /// The most recent live readings, so a page built mid-session starts
     /// with numbers rather than dashes.
     latest: RefCell<Readings>,
-    /// The person's accent, read once; every painting takes it.
-    accent: Rgb,
     /// True while a transaction is running, so two cannot overlap.
     busy: Cell<bool>,
 }
@@ -408,7 +406,8 @@ fn main() -> glib::ExitCode {
 
 /// The shared Raven Glass sheet, then this app's own classes, in one
 /// provider; the accent and light-mode overrides go in a second one above
-/// it, exactly as Settings, Store and Power layer theirs.
+/// it, exactly as Settings, Store and Power layer theirs, and follow
+/// desktop.toml.
 fn load_css() {
     let display = gdk::Display::default().expect("A graphical display is required");
     let provider = gtk::CssProvider::new();
@@ -421,7 +420,54 @@ fn load_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+    apply_look();
+    watch_desktop();
+}
 
+/// What the paintings take from desktop.toml, as last applied.
+#[derive(Clone, Copy)]
+struct Look {
+    accent: Rgb,
+    light: bool,
+    glass: bool,
+}
+
+impl Look {
+    fn read(desktop: &desktop::Desktop) -> Look {
+        Look {
+            accent: Rgb::from_hex(desktop.accent()),
+            light: desktop.appearance.theme_mode == desktop::ThemeMode::Light,
+            glass: desktop.appearance.transparency,
+        }
+    }
+}
+
+/// How long desktop.toml has to be quiet before it is re-read: one save is
+/// a burst of events (create, write, rename).
+const DESKTOP_SETTLE: Duration = Duration::from_millis(150);
+
+thread_local! {
+    static LOOK: Cell<Look> = Cell::new(Look::read(&desktop::Desktop::load()));
+    /// Every painted area, to repaint when the look changes.
+    static PAINTINGS: RefCell<Vec<glib::WeakRef<gtk::DrawingArea>>> = const { RefCell::new(Vec::new()) };
+    static OVERRIDES: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+    static DESKTOP_MONITOR: RefCell<Option<gtk::gio::FileMonitor>> = const { RefCell::new(None) };
+}
+
+/// The look as last applied; paintings read it at draw time.
+fn look() -> Look {
+    LOOK.with(Cell::get)
+}
+
+/// Repaint `area` whenever the look changes.
+fn follow_look(area: &gtk::DrawingArea) {
+    PAINTINGS.with(|p| p.borrow_mut().push(area.downgrade()));
+}
+
+/// Read desktop.toml and apply it: light/dark, the accent (stylesheet and
+/// paintings), and glass on the open windows. The override provider is
+/// replaced, never stacked, so this runs again on every change.
+fn apply_look() {
     let desktop = desktop::Desktop::load();
     let look = &desktop.appearance;
     adw::StyleManager::default().set_color_scheme(match look.theme_mode {
@@ -434,21 +480,98 @@ fn load_css() {
         format!("@define-color accent_bg_color {accent};\n@define-color accent_color {accent};\n");
     if look.theme_mode == desktop::ThemeMode::Light {
         css.push_str(include_str!("raven-glass-light.css"));
+        css.push_str(include_str!("style-light.css"));
     }
-    let overrides = gtk::CssProvider::new();
-    overrides.load_from_string(&css);
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &overrides,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-    );
+    if let Some(display) = gdk::Display::default() {
+        OVERRIDES.with(|slot| {
+            if let Some(old) = slot.borrow_mut().take() {
+                gtk::style_context_remove_provider_for_display(&display, &old);
+            }
+            let overrides = gtk::CssProvider::new();
+            overrides.load_from_string(&css);
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &overrides,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+            *slot.borrow_mut() = Some(overrides);
+        });
+    }
+
+    // Alpha only; the blur behind a glass window is the compositor's.
+    let toplevels = gtk::Window::toplevels();
+    for i in 0..toplevels.n_items() {
+        let Some(window) = toplevels.item(i).and_downcast::<gtk::Window>() else {
+            continue;
+        };
+        if !window.has_css_class("raven") {
+            continue;
+        }
+        if look.transparency && window.transient_for().is_none() {
+            window.add_css_class("glass");
+        } else {
+            window.remove_css_class("glass");
+        }
+    }
+
+    LOOK.with(|l| l.set(Look::read(&desktop)));
+    PAINTINGS.with(|paintings| {
+        paintings.borrow_mut().retain(|weak| match weak.upgrade() {
+            Some(area) => {
+                area.queue_draw();
+                true
+            }
+            None => false,
+        });
+    });
+}
+
+/// Follow desktop.toml, so a change made in Raven Settings shows here at
+/// once. The directory is watched rather than the file: the file may not
+/// exist yet, and is replaced by renaming a new one over it.
+fn watch_desktop() {
+    use gtk::gio;
+    let path = desktop::Desktop::path();
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let name = name.to_os_string();
+    let Ok(monitor) = gio::File::for_path(dir)
+        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+    else {
+        return;
+    };
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    monitor.connect_changed(move |_, file, other, event| {
+        if matches!(
+            event,
+            gio::FileMonitorEvent::AttributeChanged
+                | gio::FileMonitorEvent::PreUnmount
+                | gio::FileMonitorEvent::Unmounted
+        ) {
+            return;
+        }
+        let names_desktop = |f: Option<&gio::File>| {
+            f.and_then(|f| f.basename())
+                .is_some_and(|b| b.as_os_str() == name.as_os_str())
+        };
+        if !names_desktop(Some(file)) && !names_desktop(other) {
+            return;
+        }
+        if let Some(id) = pending.borrow_mut().take() {
+            id.remove();
+        }
+        let fired = pending.clone();
+        let id = glib::timeout_add_local_once(DESKTOP_SETTLE, move || {
+            fired.borrow_mut().take();
+            apply_look();
+        });
+        *pending.borrow_mut() = Some(id);
+    });
+    DESKTOP_MONITOR.with(|m| *m.borrow_mut() = Some(monitor));
 }
 
 fn build_ui(application: &adw::Application) {
-    let desktop = desktop::Desktop::load();
-    let accent = Rgb::from_hex(desktop.accent());
-    let glass = desktop.appearance.transparency;
-
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .title("Raven Gaming")
@@ -457,7 +580,7 @@ fn build_ui(application: &adw::Application) {
         .build();
     window.add_css_class("raven");
     // Alpha only; the blur behind a glass window is the compositor's.
-    if glass {
+    if look().glass {
         window.add_css_class("glass");
     }
 
@@ -481,7 +604,6 @@ fn build_ui(application: &adw::Application) {
         live: Rc::new(Live::default()),
         system: RefCell::new(Rc::new(checks::System::read())),
         latest: RefCell::new(Readings::default()),
-        accent,
         busy: Cell::new(false),
         window: window.clone(),
     });
@@ -509,15 +631,22 @@ fn build_ui(application: &adw::Application) {
     // blur through when the desktop asks for glass.
     let backdrop = gtk::DrawingArea::new();
     backdrop.set_draw_func(move |_, cr, width, height| {
+        let Look {
+            accent,
+            light,
+            glass,
+        } = look();
         if glass {
             cr.push_group();
         }
-        art::backdrop(cr, width as f64, height as f64, accent);
+        art::backdrop(cr, width as f64, height as f64, accent, light);
         if glass {
             let _ = cr.pop_group_to_source();
             let _ = cr.paint_with_alpha(0.86);
         }
     });
+
+    follow_look(&backdrop);
 
     let root = gtk::Overlay::new();
     root.add_css_class("app-root");
@@ -682,10 +811,11 @@ fn build_sidebar(app: &Rc<App>) -> (gtk::Widget, gtk::ToggleButton) {
     footer.set_valign(gtk::Align::End);
     let ridge = gtk::DrawingArea::new();
     ridge.set_content_height(168);
-    let accent = app.accent;
     ridge.set_draw_func(move |_, cr, width, height| {
-        art::sidebar_footer(cr, width as f64, height as f64, accent);
+        let look = look();
+        art::sidebar_footer(cr, width as f64, height as f64, look.accent, look.light);
     });
+    follow_look(&ridge);
     footer.set_child(Some(&ridge));
     let note_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     note_box.set_valign(gtk::Align::End);
@@ -1468,13 +1598,14 @@ fn gauge(
     let area = gtk::DrawingArea::new();
     area.set_content_width(SIZE);
     area.set_content_height(SIZE);
-    let accent = app.accent;
     let drawn = fraction.clone();
     area.set_draw_func(move |_, cr, width, height| {
         let size = width.min(height) as f64;
         let value = drawn.get();
-        art::ring(cr, size, value, art::load_colour(value, accent));
+        let look = look();
+        art::ring(cr, size, value, art::load_colour(value, look.accent), look.light);
     });
+    follow_look(&area);
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&area));
@@ -1712,10 +1843,10 @@ fn hero(app: &Rc<App>) -> gtk::Widget {
     // says. Rather than chase that with a layout callback, the painting
     // states a height and the words are capped to fit inside it.
     scene.set_content_height(HERO_HEIGHT);
-    let accent = app.accent;
     scene.set_draw_func(move |_, cr, width, height| {
-        art::hero(cr, width as f64, height as f64, accent);
+        art::hero(cr, width as f64, height as f64, look().accent);
     });
+    follow_look(&scene);
     frame.set_child(Some(&scene));
 
     // A stack with its own dots rather than AdwCarousel.
