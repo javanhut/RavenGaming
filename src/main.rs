@@ -47,6 +47,7 @@ mod desktop;
 mod drivers;
 mod emulators;
 mod games;
+mod glass_tint;
 mod gpu;
 mod install;
 mod share;
@@ -430,16 +431,28 @@ struct Look {
     accent: Rgb,
     light: bool,
     glass: bool,
+    /// The glass theme's window ground; `None` for Black Glass.
+    ground: Option<Rgb>,
 }
 
 impl Look {
     fn read(desktop: &desktop::Desktop) -> Look {
+        let light = desktop.appearance.theme_mode == desktop::ThemeMode::Light;
+        let tint = glass_tint::css(&desktop.appearance.glass_theme, light);
         Look {
             accent: Rgb::from_hex(desktop.accent()),
-            light: desktop.appearance.theme_mode == desktop::ThemeMode::Light,
+            light,
             glass: desktop.appearance.transparency,
+            ground: tint_ground(&tint).map(Rgb::from_hex),
         }
     }
+}
+
+/// The `window_bg_color` a glass theme's CSS defines, as `#rrggbb`.
+fn tint_ground(tint: &str) -> Option<&str> {
+    const KEY: &str = "@define-color window_bg_color ";
+    let at = tint.find(KEY)? + KEY.len();
+    tint.get(at..at + 7).filter(|hex| desktop::is_hex(hex))
 }
 
 /// How long desktop.toml has to be quiet before it is re-read: one save is
@@ -465,7 +478,7 @@ fn follow_look(area: &gtk::DrawingArea) {
 }
 
 /// Read desktop.toml and apply it: light/dark, the accent (stylesheet and
-/// paintings), and glass on the open windows. The override provider is
+/// paintings), the glass theme, and glass on the open windows. The override provider is
 /// replaced, never stacked, so this runs again on every change.
 fn apply_look() {
     let desktop = desktop::Desktop::load();
@@ -481,6 +494,19 @@ fn apply_look() {
     if look.theme_mode == desktop::ThemeMode::Light {
         css.push_str(include_str!("raven-glass-light.css"));
         css.push_str(include_str!("style-light.css"));
+    }
+    let tint = glass_tint::css(
+        &look.glass_theme,
+        look.theme_mode == desktop::ThemeMode::Light,
+    );
+    css.push_str(&tint);
+    // The painted backdrop is this window's ground, so the theme's glass
+    // window rule would only lay a second tint under it.
+    if let Some(ground) = tint_ground(&tint) {
+        css.push_str(&format!(
+            "window.raven {{ background-color: {ground}; }}\n\
+             window.raven.glass, window.raven.glass .sidebar {{ background-color: transparent; }}\n"
+        ));
     }
     if let Some(display) = gdk::Display::default() {
         OVERRIDES.with(|slot| {
@@ -635,11 +661,12 @@ fn build_ui(application: &adw::Application) {
             accent,
             light,
             glass,
+            ground,
         } = look();
         if glass {
             cr.push_group();
         }
-        art::backdrop(cr, width as f64, height as f64, accent, light);
+        art::backdrop(cr, width as f64, height as f64, accent, light, ground);
         if glass {
             let _ = cr.pop_group_to_source();
             let _ = cr.paint_with_alpha(0.86);
@@ -813,7 +840,14 @@ fn build_sidebar(app: &Rc<App>) -> (gtk::Widget, gtk::ToggleButton) {
     ridge.set_content_height(168);
     ridge.set_draw_func(move |_, cr, width, height| {
         let look = look();
-        art::sidebar_footer(cr, width as f64, height as f64, look.accent, look.light);
+        art::sidebar_footer(
+            cr,
+            width as f64,
+            height as f64,
+            look.accent,
+            look.light,
+            look.ground,
+        );
     });
     follow_look(&ridge);
     footer.set_child(Some(&ridge));

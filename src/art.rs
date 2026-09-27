@@ -316,13 +316,27 @@ pub fn hero(cr: &cairo::Context, width: f64, height: f64, accent: Rgb) {
 /// colour, and a low ridge along the bottom. Everything else in the window
 /// is translucent glass sitting on this, which is where the depth comes
 /// from. `light` is the desktop's light mode: the same scene at dawn, pale
-/// enough for Raven's dark text to sit on.
-pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb, light: bool) {
+/// enough for Raven's dark text to sit on. `ground` is the glass theme's
+/// window colour, which the base and the ridge take instead when set.
+pub fn backdrop(
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+    accent: Rgb,
+    light: bool,
+    ground: Option<Rgb>,
+) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
     let base = cairo::LinearGradient::new(0.0, 0.0, width * 0.35, height);
-    if light {
+    if let Some(ground) = ground {
+        let top = ground.shade(1.03);
+        let foot = ground.shade(0.95);
+        base.add_color_stop_rgba(0.0, top.r, top.g, top.b, 1.0);
+        base.add_color_stop_rgba(0.55, ground.r, ground.g, ground.b, 1.0);
+        base.add_color_stop_rgba(1.0, foot.r, foot.g, foot.b, 1.0);
+    } else if light {
         base.add_color_stop_rgba(0.0, 0.953, 0.957, 0.976, 1.0);
         base.add_color_stop_rgba(0.55, 0.937, 0.941, 0.965, 1.0);
         base.add_color_stop_rgba(1.0, 0.929, 0.918, 0.957, 1.0);
@@ -361,10 +375,10 @@ pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb, light
             seed: 0x7777,
             base: 1.26,
             amplitude: 0.20,
-            colour: if light {
-                Rgb::new(0.855, 0.843, 0.906)
-            } else {
-                Rgb::new(0.043, 0.035, 0.086)
+            colour: match ground {
+                Some(ground) => ground.shade(0.85),
+                None if light => Rgb::new(0.855, 0.843, 0.906),
+                None => Rgb::new(0.043, 0.035, 0.086),
             },
             alpha: 0.9,
         },
@@ -372,8 +386,16 @@ pub fn backdrop(cr: &cairo::Context, width: f64, height: f64, accent: Rgb, light
 }
 
 /// The smaller version at the foot of the sidebar. In `light` the ridges
-/// are pale, because the sidebar's dark note is drawn over them.
-pub fn sidebar_footer(cr: &cairo::Context, width: f64, height: f64, accent: Rgb, light: bool) {
+/// are pale, because the sidebar's dark note is drawn over them. `ground`
+/// is the glass theme's window colour, which the near ridge takes when set.
+pub fn sidebar_footer(
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+    accent: Rgb,
+    light: bool,
+    ground: Option<Rgb>,
+) {
     if width <= 0.0 || height <= 0.0 {
         return;
     }
@@ -395,10 +417,10 @@ pub fn sidebar_footer(cr: &cairo::Context, width: f64, height: f64, accent: Rgb,
             seed: 0x6262,
             base: 1.18,
             amplitude: 0.50,
-            colour: if light {
-                Rgb::new(0.80, 0.78, 0.88)
-            } else {
-                Rgb::new(0.13, 0.10, 0.24)
+            colour: match ground {
+                Some(ground) => ground.shade(if light { 0.90 } else { 0.80 }),
+                None if light => Rgb::new(0.80, 0.78, 0.88),
+                None => Rgb::new(0.13, 0.10, 0.24),
             },
             alpha: 0.75,
         },
@@ -549,8 +571,8 @@ mod tests {
         let accent = Rgb::fallback();
         hero(&cr, 0.0, 0.0, accent);
         for light in [false, true] {
-            backdrop(&cr, 0.0, 0.0, accent, light);
-            sidebar_footer(&cr, -5.0, 10.0, accent, light);
+            backdrop(&cr, 0.0, 0.0, accent, light, None);
+            sidebar_footer(&cr, -5.0, 10.0, accent, light, None);
             ring(&cr, 0.0, 0.5, accent, light);
         }
     }
@@ -562,7 +584,7 @@ mod tests {
             let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, 64, 64).unwrap();
             {
                 let cr = cairo::Context::new(&surface).unwrap();
-                backdrop(&cr, 64.0, 64.0, Rgb::fallback(), light);
+                backdrop(&cr, 64.0, 64.0, Rgb::fallback(), light, None);
             }
             surface.flush();
             let data = surface.data().unwrap();
@@ -574,6 +596,22 @@ mod tests {
     }
 
     #[test]
+    fn a_glass_theme_ground_replaces_the_night() {
+        // Rose Glass, dark: #5A3A4E. Sampled near the top, clear of the
+        // ridge, where only the base and a faint cloud are.
+        let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, 64, 64).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            let rose = Rgb::from_hex("#5A3A4E");
+            backdrop(&cr, 64.0, 64.0, Rgb::fallback(), false, Some(rose));
+        }
+        surface.flush();
+        let data = surface.data().unwrap();
+        // BGRx: red is byte 2, and rose is far redder than the night.
+        assert!(data[2] as f64 / 255.0 > 0.3);
+    }
+
+    #[test]
     fn a_painting_leaves_the_context_as_it_found_it() {
         // Each one clips or transforms; a leaked clip would silently crop
         // whatever is drawn next in the same snapshot.
@@ -581,7 +619,7 @@ mod tests {
         let cr = cairo::Context::new(&surface).unwrap();
         let before = cr.clip_extents().unwrap();
         hero(&cr, 64.0, 48.0, Rgb::fallback());
-        sidebar_footer(&cr, 64.0, 48.0, Rgb::fallback(), false);
+        sidebar_footer(&cr, 64.0, 48.0, Rgb::fallback(), false, None);
         let after = cr.clip_extents().unwrap();
         assert_eq!(before, after);
     }
