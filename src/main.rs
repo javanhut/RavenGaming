@@ -47,7 +47,6 @@ mod desktop;
 mod drivers;
 mod emulators;
 mod games;
-mod glass_tint;
 mod gpu;
 mod install;
 mod share;
@@ -405,15 +404,17 @@ fn main() -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
-/// The shared Raven Glass sheet, then this app's own classes, in one
+/// The shared Raven Glass sheet (the raven-glass crate in RavenGUI,
+/// installed at /usr/share/raven/glass/), then this app's own classes, in one
 /// provider; the accent and light-mode overrides go in a second one above
 /// it, exactly as Settings, Store and Power layer theirs, and follow
 /// desktop.toml.
 fn load_css() {
     let display = gdk::Display::default().expect("A graphical display is required");
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(concat!(
-        include_str!("raven-glass.css"),
+    provider.load_from_string(&format!(
+        "{}{}",
+        raven_glass::base_css(),
         include_str!("style.css")
     ));
     gtk::style_context_add_provider_for_display(
@@ -438,7 +439,7 @@ struct Look {
 impl Look {
     fn read(desktop: &desktop::Desktop) -> Look {
         let light = desktop.appearance.theme_mode == desktop::ThemeMode::Light;
-        let tint = glass_tint::css(&desktop.appearance.glass_theme, light);
+        let tint = raven_glass::tint::css(&desktop.appearance.glass_theme, light);
         Look {
             accent: Rgb::from_hex(desktop.accent()),
             light,
@@ -492,10 +493,10 @@ fn apply_look() {
     let mut css =
         format!("@define-color accent_bg_color {accent};\n@define-color accent_color {accent};\n");
     if look.theme_mode == desktop::ThemeMode::Light {
-        css.push_str(include_str!("raven-glass-light.css"));
+        css.push_str(raven_glass::light_css());
         css.push_str(include_str!("style-light.css"));
     }
-    let tint = glass_tint::css(
+    let tint = raven_glass::tint::css(
         &look.glass_theme,
         look.theme_mode == desktop::ThemeMode::Light,
     );

@@ -524,10 +524,15 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libc",
+ "raven-glass",
  "serde",
  "serde_json",
  "toml",
 ]
+
+[[package]]
+name = "raven-glass"
+version = "0.0.1"
 
 [[package]]
 name = "rustc_version"

@@ -207,8 +207,8 @@ sudo imlazy install
 
 Raven Gaming follows `~/.config/raven/desktop.toml` — theme mode, accent
 colour and window transparency — which Raven Settings owns. The shared
-`raven-glass.css` sheet is byte-identical to the copy in Raven Settings,
-Raven Store and Raven Power; `style.css` is this app's own and layers over
+Raven Glass sheet comes from the raven-glass crate in RavenGUI (installed at
+`/usr/share/raven/glass/`); `style.css` is this app's own and layers over
 it.
 
 One deliberate departure from the shared palette: the window's base is a
